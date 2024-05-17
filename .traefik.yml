@@ -1,4 +1,4 @@
-displayName: MTLS or IP Whitelist
+displayName: MTLS or Whitelist
 type: middleware
 iconPath: .assets/icon.jpg
 
@@ -7,6 +7,9 @@ import: github.com/smerschjohann/mtlswhitelist
 summary: 'Either allow access based on mTLS or IP Whitelist'
 
 testData:
-  allowedCidrs:
-  - "192.168.0.0/24"
-  - "127.0.0.0/8"
+  rules:
+  - type: ipRange
+    addInterface: true # adds the ip ranges of the default route to the whitelist
+    ipRanges:
+    - 127.0.0.1/8
+    - 192.168.0.1/16
