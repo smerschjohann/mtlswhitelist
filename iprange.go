@@ -17,6 +17,7 @@ type RuleIPRange struct {
 func (r *RuleIPRange) Init() error {
 	netCidrs := make([]*net.IPNet, 0, len(r.Ranges))
 
+	fmt.Printf("Ranges: %v", r.Ranges)
 	for _, cidr := range r.Ranges {
 		_, ipNet, err := net.ParseCIDR(cidr)
 		if err != nil {

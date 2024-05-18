@@ -1,7 +1,6 @@
 package mtlswhitelist
 
 import (
-	"net"
 	"net/http"
 	"testing"
 )
@@ -10,7 +9,6 @@ func TestRuleIPRange_Match(t *testing.T) {
 	type fields struct {
 		Ranges       []string
 		AddInterface bool
-		allowedCidrs []*net.IPNet
 	}
 	type args struct {
 		req *http.Request

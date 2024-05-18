@@ -82,6 +82,29 @@ Please note if you configure traefik without host network inside a container, it
 In this example, the `Header` rule will match any request where the `User-Agent` header contains the string "Firefox" and the `Accept-Language` header exactly matches the string "en-US,en;q=0.5".
 
 
+### External Data
+
+The external configuration allows you to fetch data from an external source and use it in the plugin. In the provided example, the external data is fetched from the Kubernetes API and the data is stored in a ConfigMap.
+
+```yaml
+externalData:
+  skipTlsVerify: true
+  url: https://1.2.3.4:6443/api/v1/namespaces/code/configmaps/whitelist # should return a json document
+  dataKey: data # a key that holds relevant data
+  headers:
+    Content-Type: "application/json"
+    Authorization: Bearer [[ file "/var/run/secrets/kubernetes.io/serviceaccount/token" ]] # if used like this, the SA of traefik needs to have read permission for this specific URL/configmap
+```
+
+To configure the external data, you need to provide the following information:
+
+- `skipTlsVerify`: A boolean field indicating whether to skip TLS verification when fetching the data. Set it to true if you want to skip verification.
+`url`: The URL from which to fetch the data. In the example, it is set to https://1.2.3.4:6443/api/v1/namespaces/code/configmaps/whitelist.
+- `dataKey`: The key in the fetched JSON document that holds the relevant data. In the example, it is set to data.
+- `headers`: Additional headers to include in the request. In the example, Content-Type and Authorization headers are included.
+
+The external data can be used for types `ipRange` and `header`.
+
   
 
 ### Configuration Example
@@ -143,11 +166,20 @@ http:
     mtlswhitelist:
       plugin:
         mtlswhitelist:
+          refreshInterval: 30m # if you are using files or external data you can update it periodically, skip if not required
+          externalData:
+            skipTlsVerify: true
+            url: https://1.2.3.4:6443/api/v1/namespaces/default/configmaps/whitelist # should return a json document
+            dataKey: data # a key that holds relevant data
+            headers:
+              Content-Type: "application/json"
+              Authorization: Bearer [[ file "/var/run/secrets/kubernetes.io/serviceaccount/token" ]] # if used like this, the SA of traefik needs to have read permission for this specific URL/configmap
           rules:
           - type: ipRange
             addInterface: true # adds the ip ranges of the default route to the whitelist
-            ranges: []
-            # - 192.168.0.0/24
+            ranges:
+            - "192.168.0.0/24"
+            - "[[ .data.ipRange ]]" # .data is from the external resource (e.g. Kubernetes ConfigMap)
           - type: header
             headers:
               Custom-Header: "prefix.*"

@@ -3,6 +3,8 @@ package mtlswhitelist
 import (
 	"fmt"
 	"net/http"
+	"strings"
+	"time"
 )
 
 const (
@@ -35,7 +37,9 @@ type RuleNoneOf struct {
 }
 
 type Config struct {
-	Rules []Rule `json:"rules"`
+	CreationTime time.Time
+	NextUpdate   *time.Time
+	Rules        []Rule `json:"rules"`
 }
 
 func (r *RuleAllOf) Init() error {
@@ -95,15 +99,14 @@ func (r *RuleNoneOf) Match(req *http.Request) bool {
 	return true
 }
 
-func mapRules(rawRules []RawRule) ([]Rule, error) {
+func mapRules(tmplData map[string]interface{}, rawRules []RawRule) ([]Rule, error) {
 	var rules []Rule = make([]Rule, 0)
 	for _, rawRule := range rawRules {
-		println("Mapping rule: ", rawRule.Type)
 		var rule Rule
 		switch rawRule.Type {
 		case AllOf:
 			rrule := &RuleAllOf{}
-			rules, err := mapRules(rawRule.Rules)
+			rules, err := mapRules(tmplData, rawRule.Rules)
 			if err != nil {
 				return nil, fmt.Errorf("error mapping rules: %w", err)
 			}
@@ -111,7 +114,7 @@ func mapRules(rawRules []RawRule) ([]Rule, error) {
 			rule = rrule
 		case AnyOf:
 			rrule := &RuleAnyOf{}
-			rules, err := mapRules(rawRule.Rules)
+			rules, err := mapRules(tmplData, rawRule.Rules)
 			if err != nil {
 				return nil, fmt.Errorf("error mapping rules: %w", err)
 			}
@@ -119,7 +122,7 @@ func mapRules(rawRules []RawRule) ([]Rule, error) {
 			rule = rrule
 		case NoneOf:
 			rrule := &RuleNoneOf{}
-			rules, err := mapRules(rawRule.Rules)
+			rules, err := mapRules(tmplData, rawRule.Rules)
 			if err != nil {
 				return nil, fmt.Errorf("error mapping rules: %w", err)
 			}
@@ -127,12 +130,38 @@ func mapRules(rawRules []RawRule) ([]Rule, error) {
 			rule = rrule
 		case IPRange:
 			rrule := &RuleIPRange{}
-			rrule.Ranges = rawRule.Ranges
+			for _, rangeStr := range rawRule.Ranges {
+				val, err := templateValue(rangeStr, tmplData)
+				if err != nil {
+					return nil, fmt.Errorf("error templating value: %w", err)
+				}
+				if strings.Contains(val, ",") {
+					ranges := strings.Split(val, ",")
+					for _, rangeStr := range ranges {
+						rangeStr = strings.TrimSpace(rangeStr)
+						if rangeStr != "" {
+							rrule.Ranges = append(rrule.Ranges, rangeStr)
+						}
+					}
+				} else {
+					rangeStr = strings.TrimSpace(val)
+					if rangeStr != "" {
+						rrule.Ranges = append(rrule.Ranges, rangeStr)
+					}
+				}
+			}
 			rrule.AddInterface = rawRule.AddInterface
 			rule = rrule
 		case Header:
 			rrule := &RuleHeader{}
-			rrule.Headers = rawRule.Headers
+			rrule.Headers = make(map[string]string, len(rawRule.Headers))
+			for key, value := range rawRule.Headers {
+				val, err := templateValue(value, tmplData)
+				if err != nil {
+					return nil, fmt.Errorf("error templating value: %w", err)
+				}
+				rrule.Headers[key] = val
+			}
 			rule = rrule
 		default:
 			return nil, fmt.Errorf("unknown rule type: %s", rawRule.Type)
@@ -144,12 +173,35 @@ func mapRules(rawRules []RawRule) ([]Rule, error) {
 
 func NewConfig(rawConfig *RawConfig) (*Config, error) {
 	config := &Config{}
+	tmplData := make(map[string]interface{})
 
-	rules, err := mapRules(rawConfig.Rules)
+	if rawConfig.ExternalData.URL != "" {
+		data, err := GetExternalData(rawConfig.ExternalData)
+		if err != nil {
+			return nil, err
+		}
+		tmplData["data"] = data[rawConfig.ExternalData.DataKey]
+	}
+	fmt.Printf("external data: %v\n", tmplData)
+
+	rules, err := mapRules(tmplData, rawConfig.Rules)
 	if err != nil {
 		return nil, err
 	}
+	config.CreationTime = time.Now()
 	config.Rules = rules
+
+	if rawConfig.RefreshInterval != "" {
+		duration, err := time.ParseDuration(rawConfig.RefreshInterval)
+		if err != nil {
+			return nil, fmt.Errorf("error parsing refresh interval: %w", err)
+		}
+		nextUpdate := config.CreationTime.Add(duration)
+		config.NextUpdate = &nextUpdate
+	} else {
+		config.NextUpdate = nil
+	}
+
 	return config, nil
 }
 
