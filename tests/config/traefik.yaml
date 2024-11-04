@@ -1,0 +1,30 @@
+log:
+  level: DEBUG
+
+accessLog: {}
+
+entryPoints:
+  web:
+    address: :8180
+    http:
+      redirections:
+        entryPoint:
+          to: websecure
+          scheme: https
+  websecure:
+    address: :8140
+
+providers:
+  file:
+    filename: "/config/dynamic.yaml"
+
+# experimental:
+#   plugins:
+#     mtlswhitelist:
+#       moduleName: github.com/smerschjohann/mtlswhitelist
+#       version: v0.1.0
+
+experimental:
+ localPlugins:
+   mtlswhitelist:
+     moduleName: github.com/smerschjohann/mtlswhitelist

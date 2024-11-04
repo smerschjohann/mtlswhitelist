@@ -1,0 +1,38 @@
+http:
+  services:
+    service1:
+      loadBalancer:
+        servers:
+          - url: "http://whoami/"
+  routers:
+    router1:
+      rule: "Host(`whoami.localhost.direct`)"
+      service: service1
+      tls:
+        options: clientca
+      middlewares:
+        - mtlswhitelist
+
+  middlewares:
+    mtlswhitelist:
+      plugin:
+        mtlswhitelist:
+          refreshInterval: 30m # if you are using files or external data you can update it periodically, skip if not required
+          rules:
+          - type: ipRange
+            addInterface: false # adds the ip ranges of the default route to the whitelist
+            ranges:
+            - "192.168.0.0/24"
+            - "10.89.0.0/24"
+
+tls:
+  certificates:
+    - certFile: /config/certs/localhost.direct.crt
+      keyFile: /config/certs/localhost.direct.key
+
+  options:
+    clientca:
+      clientAuth:
+        caFiles:
+          - /config/certs/ca.pem
+        clientAuthType: VerifyClientCertIfGiven

@@ -1,0 +1,18 @@
+
+services:
+  traefik:
+    image: traefik:v3.2
+    command:
+      - "--api.insecure=true"
+      - "--providers.docker=true"
+      - "--entrypoints.web.address=:80"
+    ports:
+      - "8140:8140"
+    volumes:
+      - "/run/user/1000/podman/podman.sock:/var/run/docker.sock:ro"
+      - "./config/traefik.yaml:/etc/traefik/traefik.yaml:roz"
+      - "./config:/config:ro"
+      - "../:/plugins-local/src/github.com/smerschjohann/mtlswhitelist"
+
+  whoami:
+    image: containous/whoami:latest
