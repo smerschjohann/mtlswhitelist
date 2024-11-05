@@ -10,6 +10,6 @@ testData:
   rules:
   - type: ipRange
     addInterface: true # adds the ip ranges of the default route to the whitelist
-    ipRanges:
+    ranges:
     - 127.0.0.1/8
     - 192.168.0.1/16
