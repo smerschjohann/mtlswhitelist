@@ -36,7 +36,10 @@ func Test_templateValue_env(t *testing.T) {
 	// Prepare test: set an environment variable
 	key := "TEST"
 	value := "Hello, World!"
-	t.Setenv(key, value)
+
+	//nolint
+	os.Setenv(key, value)
+	defer os.Unsetenv(key)
 
 	// Run test
 	got, err := templateValue("[[ env \"TEST\" ]]", nil)

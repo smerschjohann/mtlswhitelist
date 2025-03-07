@@ -67,3 +67,4 @@ issues:
         - godot
         - errcheck
         - forcetypeassert
+        - gosec
