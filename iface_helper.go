@@ -1,6 +1,7 @@
 package mtlswhitelist
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -25,7 +26,7 @@ func getDefaultGatewayInterface() (string, error) {
 		}
 	}
 
-	return "", fmt.Errorf("default gateway interface not found")
+	return "", errors.New("default gateway interface not found")
 }
 
 func getIPv4AddressRanges(ifaceName string) ([]string, error) {

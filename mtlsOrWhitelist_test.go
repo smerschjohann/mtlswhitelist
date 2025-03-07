@@ -7,7 +7,6 @@ import (
 	"math/big"
 	"net/http"
 	"net/http/httptest"
-	"sync"
 	"testing"
 	"text/template"
 	"time"
@@ -22,7 +21,7 @@ func (m *mockHandler) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 	rw.WriteHeader(http.StatusOK)
 }
 
-func generateTestCertificate() (*x509.Certificate, error) {
+func generateTestCertificate() *x509.Certificate {
 	cert := &x509.Certificate{
 		SerialNumber: big.NewInt(12345),
 		Subject: pkix.Name{
@@ -35,21 +34,16 @@ func generateTestCertificate() (*x509.Certificate, error) {
 		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth, x509.ExtKeyUsageServerAuth},
 		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
 	}
-	return cert, nil
+	return cert
 }
 
 func TestMTlsOrWhitelist_ServeHTTP(t *testing.T) {
-	cert, err := generateTestCertificate()
-	if err != nil {
-		t.Fatalf("Failed to generate test certificate: %v", err)
-	}
+	cert := generateTestCertificate()
 
 	type fields struct {
 		next           http.Handler
-		name           string
 		matchers       *Config
 		rawConfig      *RawConfig
-		updateMutex    sync.Mutex
 		requestHeaders map[string]*template.Template
 	}
 	type args struct {
@@ -102,6 +96,7 @@ func TestMTlsOrWhitelist_ServeHTTP(t *testing.T) {
 			wantHeaderSN:   "12345",
 			wantHeaderCN:   "TestCN",
 			requestHeaderCheck: func(t *testing.T, req *http.Request) {
+				t.Helper()
 				if req.Header.Get("X-Custom-Header") != "TestCN" {
 					t.Errorf("X-Custom-Header = %v, want %v", req.Header.Get("X-Custom-Header"), "TestCN")
 				}
@@ -134,6 +129,7 @@ func TestMTlsOrWhitelist_ServeHTTP(t *testing.T) {
 			wantStatusCode: http.StatusOK,
 			wantHeaderSN:   "NoCert",
 			requestHeaderCheck: func(t *testing.T, req *http.Request) {
+				t.Helper()
 				if req.Header.Get("X-Custom-Header") != "staticvalue" {
 					t.Errorf("X-Custom-Header = %v, want %v", req.Header.Get("X-Custom-Header"), "staticvalue")
 				}
@@ -168,7 +164,7 @@ func TestMTlsOrWhitelist_ServeHTTP(t *testing.T) {
 			}
 			err := a.matchers.Init()
 			if err != nil {
-				t.Errorf("error init matchers, test error %v", err)
+				t.Errorf("error init matchers, test %v, error: %v", tt.name, err)
 			}
 			a.ServeHTTP(tt.args.rw, tt.args.req)
 			resp := tt.args.rw.(*httptest.ResponseRecorder)
@@ -178,7 +174,7 @@ func TestMTlsOrWhitelist_ServeHTTP(t *testing.T) {
 			}
 
 			if tt.wantHeaderSN != "" {
-				if got := tt.args.req.Header.Get("X-Whitelist-Cert-SN"); got != tt.wantHeaderSN {
+				if got := tt.args.req.Header.Get("X-Whitelist-Cert-Sn"); got != tt.wantHeaderSN {
 					t.Errorf("ServeHTTP() X-Whitelist-Cert-SN = %v, want %v", got, tt.wantHeaderSN)
 				}
 			}
@@ -198,22 +194,4 @@ func (m mockNextHandler) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 	} else {
 		panic("next should not have been called")
 	}
-}
-
-type mockMatcher struct {
-	Allowed    bool
-	NextUpdate *time.Time
-	Config     *Config
-}
-
-func (m *mockMatcher) Match(req *http.Request) bool {
-	return m.Allowed
-}
-
-func (m *mockMatcher) Update(cfg *Config) {
-	m.Config = cfg
-}
-
-func (m *mockMatcher) GetConfig() *Config {
-	return m.Config
 }

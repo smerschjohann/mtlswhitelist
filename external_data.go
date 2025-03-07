@@ -12,27 +12,29 @@ import (
 )
 
 func GetExternalData(config ExternalData) (map[string]interface{}, error) {
-	req, err := http.NewRequest("GET", config.URL, nil)
+	req, err := http.NewRequest(http.MethodGet, config.URL, nil)
 	if err != nil {
 		return nil, err
 	}
 
 	for key, value := range config.Headers {
-		tval, err := templateValue(value, "")
-		if err != nil {
+		tval, templateErr := templateValue(value, "")
+		if templateErr != nil {
 			return nil, fmt.Errorf("error in templateValue %s: %w", value, err)
 		}
 		req.Header.Set(key, tval)
 	}
 
 	client := &http.Client{
-		Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: config.SkipTlsVerify}},
+		Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: config.SkipTLSVerify}},
 	}
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {

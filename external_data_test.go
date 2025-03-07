@@ -7,7 +7,7 @@ import (
 
 func Test_templateValue_file(t *testing.T) {
 	// Prepare test: create a temporary file and write some data to it
-	tmpfile, err := os.CreateTemp("", "test")
+	tmpfile, err := os.CreateTemp(t.TempDir(), "test")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -36,8 +36,7 @@ func Test_templateValue_env(t *testing.T) {
 	// Prepare test: set an environment variable
 	key := "TEST"
 	value := "Hello, World!"
-	os.Setenv(key, value)
-	defer os.Unsetenv(key) // clean up
+	t.Setenv(key, value)
 
 	// Run test
 	got, err := templateValue("[[ env \"TEST\" ]]", nil)
@@ -58,7 +57,6 @@ func Test_ExternalData(t *testing.T) {
 		},
 		DataKey: "title",
 	})
-
 	if err != nil {
 		t.Errorf("GetExternalData() error = %v", err)
 		return

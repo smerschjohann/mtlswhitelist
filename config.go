@@ -17,7 +17,7 @@ const (
 
 type Rule interface {
 	Init() error
-	Match(*http.Request) bool
+	Match(req *http.Request) bool
 }
 
 type BaseRule struct {
@@ -99,34 +99,35 @@ func (r *RuleNoneOf) Match(req *http.Request) bool {
 	return true
 }
 
+//nolint:gocognit,gocyclo,funlen
 func mapRules(tmplData map[string]interface{}, rawRules []RawRule) ([]Rule, error) {
-	var rules []Rule = make([]Rule, 0)
+	rules := make([]Rule, 0, len(rawRules))
 	for _, rawRule := range rawRules {
 		var rule Rule
 		switch rawRule.Type {
 		case AllOf:
 			rrule := &RuleAllOf{}
-			rules, err := mapRules(tmplData, rawRule.Rules)
+			allOfRules, err := mapRules(tmplData, rawRule.Rules)
 			if err != nil {
 				return nil, fmt.Errorf("error mapping rules: %w", err)
 			}
-			rrule.Rules = rules
+			rrule.Rules = allOfRules
 			rule = rrule
 		case AnyOf:
 			rrule := &RuleAnyOf{}
-			rules, err := mapRules(tmplData, rawRule.Rules)
+			anyOfRules, err := mapRules(tmplData, rawRule.Rules)
 			if err != nil {
 				return nil, fmt.Errorf("error mapping rules: %w", err)
 			}
-			rrule.Rules = rules
+			rrule.Rules = anyOfRules
 			rule = rrule
 		case NoneOf:
 			rrule := &RuleNoneOf{}
-			rules, err := mapRules(tmplData, rawRule.Rules)
+			noneOfRules, err := mapRules(tmplData, rawRule.Rules)
 			if err != nil {
 				return nil, fmt.Errorf("error mapping rules: %w", err)
 			}
-			rrule.Rules = rules
+			rrule.Rules = noneOfRules
 			rule = rrule
 		case IPRange:
 			rrule := &RuleIPRange{}

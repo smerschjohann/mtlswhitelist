@@ -1,4 +1,4 @@
-// Package plugindemo a demo plugin.
+// Package mtlswhitelist a traefik plugin to check on the certificate or optional a whitelist.
 package mtlswhitelist
 
 import (
@@ -20,7 +20,7 @@ type MTlsOrWhitelist struct {
 	requestHeaders map[string]*template.Template
 }
 
-// yaegi is a bit dump and doesn't correctly reflect the type of the config struct so we need to define it here
+// RawRule must be defined as  yaegi is a bit dumb and doesn't correctly reflect the type of the config struct.
 type RawRule struct {
 	Type         string            `json:"type"`
 	Headers      map[string]string `json:"headers,omitempty"`
@@ -33,7 +33,7 @@ type ExternalData struct {
 	URL           string            `json:"url"`
 	Headers       map[string]string `json:"headers,omitempty"`
 	DataKey       string            `json:"dataKey,omitempty"` // if the data is nested in the response, specify the key here
-	SkipTlsVerify bool              `json:"skipTlsVerify,omitempty"`
+	SkipTLSVerify bool              `json:"skipTlsVerify,omitempty"`
 }
 
 type RawConfig struct {
@@ -53,7 +53,10 @@ func New(ctx context.Context, next http.Handler, rawConfig *RawConfig, name stri
 	if err != nil {
 		return nil, err
 	}
-	config.Init()
+	err = config.Init()
+	if err != nil {
+		return nil, err
+	}
 
 	templates := make(map[string]*template.Template, len(rawConfig.RequestHeaders))
 	for headerName, headerTemplate := range rawConfig.RequestHeaders {
@@ -75,34 +78,20 @@ func New(ctx context.Context, next http.Handler, rawConfig *RawConfig, name stri
 
 func (a *MTlsOrWhitelist) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 	if req.TLS != nil && len(req.TLS.PeerCertificates) > 0 {
-		cert := req.TLS.PeerCertificates[0]
-
-		fmt.Println("Client Certificate: ", req.TLS.PeerCertificates[0].Subject)
-		req.Header.Set("X-Whitelist-Cert-SN", cert.SerialNumber.String())
-		req.Header.Set("X-Whitelist-Cert-CN", cert.Subject.CommonName)
-
-		// add additional headers if defined as requestHeaders
-		for headerName, tmpl := range a.requestHeaders {
-			var tplOutput bytes.Buffer
-			err := tmpl.Execute(&tplOutput, map[string]interface{}{"Cert": cert, "Req": req})
-			if err != nil {
-				fmt.Printf("Error executing template for header %s: %v\n", headerName, err)
-				continue // Skip this header if there's an error
-			}
-			req.Header.Set(headerName, tplOutput.String())
-		}
-
-		a.next.ServeHTTP(rw, req)
+		handleRequestsWithValidCert(req, a, rw)
 		return
 	}
 
 	// if no cert provided and request is not from accepted ips, set SN to NoCert
-	req.Header.Set("X-Whitelist-Cert-SN", "NoCert")
+	req.Header.Set("X-Whitelist-Cert-Sn", "NoCert")
 
 	allowed := a.matchers.Match(req)
 	if !allowed {
 		if a.matchers.NextUpdate != nil && a.matchers.NextUpdate.Before(time.Now()) {
-			a.updateConfig()
+			err := a.updateConfig()
+			if err != nil {
+				fmt.Printf("error updating config: %v", err)
+			}
 			allowed = a.matchers.Match(req)
 		}
 
@@ -123,10 +112,40 @@ func (a *MTlsOrWhitelist) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 		req.Header.Set(headerName, tplOutput.String())
 	}
 
-	if a.matchers.NextUpdate != nil && a.matchers.NextUpdate.Before(time.Now()) {
-		go a.updateConfig()
-	}
+	a.updateConfigIfRequired()
 	a.next.ServeHTTP(rw, req)
+}
+
+func handleRequestsWithValidCert(req *http.Request, a *MTlsOrWhitelist, rw http.ResponseWriter) {
+	cert := req.TLS.PeerCertificates[0]
+
+	fmt.Println("Client Certificate: ", req.TLS.PeerCertificates[0].Subject)
+	req.Header.Set("X-Whitelist-Cert-Sn", cert.SerialNumber.String())
+	req.Header.Set("X-Whitelist-Cert-Cn", cert.Subject.CommonName)
+
+	// add additional headers if defined as requestHeaders
+	for headerName, tmpl := range a.requestHeaders {
+		var tplOutput bytes.Buffer
+		err := tmpl.Execute(&tplOutput, map[string]interface{}{"Cert": cert, "Req": req})
+		if err != nil {
+			fmt.Printf("Error executing template for header %s: %v\n", headerName, err)
+			continue // Skip this header if there's an error
+		}
+		req.Header.Set(headerName, tplOutput.String())
+	}
+
+	a.next.ServeHTTP(rw, req)
+}
+
+func (a *MTlsOrWhitelist) updateConfigIfRequired() {
+	if a.matchers.NextUpdate != nil && a.matchers.NextUpdate.Before(time.Now()) {
+		go func() {
+			err := a.updateConfig()
+			if err != nil {
+				fmt.Printf("could not update config %v\n", err)
+			}
+		}()
+	}
 }
 
 func (a *MTlsOrWhitelist) updateConfig() error {

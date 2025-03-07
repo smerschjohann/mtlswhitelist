@@ -1,7 +1,6 @@
 package mtlswhitelist
 
 import (
-	"os"
 	"reflect"
 	"testing"
 )
@@ -69,8 +68,7 @@ func TestWithExternalData(t *testing.T) {
 	// Prepare test: set an environment variable
 	key := "TEST"
 	value := "127.0.0.1/8,8.8.8.8/32"
-	os.Setenv(key, value)
-	defer os.Unsetenv(key) // clean up
+	t.Setenv(key, value)
 
 	config := &RawConfig{
 		Rules: []RawRule{
