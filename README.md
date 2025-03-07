@@ -105,7 +105,31 @@ To configure the external data, you need to provide the following information:
 
 The external data can be used for types `ipRange` and `header`.
 
-  
+### Refresh Interval
+
+The plugin allows you to define a refresh interval for the external data. The refresh interval is defined in the `RefreshInterval` field, which is a duration string that specifies how often the external data should be fetched. The duration string should be in the format accepted by Go's time.ParseDuration function. For example:
+
+```yaml
+refreshInterval: 30m
+```
+
+### Request Headers
+
+The plugin allows you to define request headers that should be passed to the backend. The headers are defined in the `RequestHeaders` field, which is a map where the keys are the names of the headers and the values are Go template strings that will be evaluated at runtime. The Go template strings can include variables that are provided by Traefik, such as the client certificate information.
+
+Defined are the following variables:
+
+- `Cert`: The client certificate information. This variable provides access to the client certificate's subject, issuer, and other fields. For example, to access the client certificate's Common Name, you can use `[[.Cert.Subject.CommonName]]`.
+- `Req`: The HTTP request information. This variable provides access to the HTTP request's headers, method, and other fields.
+
+```yaml
+requestHeaders:
+  X-Cert-Mail: "[[.Cert.Subject.CommonName]]@domain.tld"
+```
+
+In this example, the `X-Cert-Mail` header will be added to the request with the value of the client's Common Name from the certificate appended with "@domain.tld".
+
+
 
 ### Configuration Example
 
@@ -166,6 +190,8 @@ http:
     mtlswhitelist:
       plugin:
         mtlswhitelist:
+          requestHeaders:
+            X-Cert-Mail: "[[.Cert.Subject.CommonName]]@domain.tld"
           refreshInterval: 30m # if you are using files or external data you can update it periodically, skip if not required
           externalData:
             skipTlsVerify: true

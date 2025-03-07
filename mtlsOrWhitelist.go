@@ -2,19 +2,22 @@
 package mtlswhitelist
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"net/http"
 	"sync"
+	"text/template"
 	"time"
 )
 
 type MTlsOrWhitelist struct {
-	next        http.Handler
-	name        string
-	matchers    *Config
-	rawConfig   *RawConfig
-	updateMutex sync.Mutex
+	next           http.Handler
+	name           string
+	matchers       *Config
+	rawConfig      *RawConfig
+	updateMutex    sync.Mutex
+	requestHeaders map[string]*template.Template
 }
 
 // yaegi is a bit dump and doesn't correctly reflect the type of the config struct so we need to define it here
@@ -34,9 +37,10 @@ type ExternalData struct {
 }
 
 type RawConfig struct {
-	Rules           []RawRule    `json:"rules"`
-	ExternalData    ExternalData `json:"externalData,omitempty"`
-	RefreshInterval string       `json:"refreshInterval,omitempty"`
+	Rules           []RawRule         `json:"rules"`
+	ExternalData    ExternalData      `json:"externalData,omitempty"`
+	RefreshInterval string            `json:"refreshInterval,omitempty"`
+	RequestHeaders  map[string]string `json:"requestHeaders,omitempty"`
 }
 
 func CreateConfig() *RawConfig {
@@ -51,19 +55,43 @@ func New(ctx context.Context, next http.Handler, rawConfig *RawConfig, name stri
 	}
 	config.Init()
 
+	templates := make(map[string]*template.Template, len(rawConfig.RequestHeaders))
+	for headerName, headerTemplate := range rawConfig.RequestHeaders {
+		tmpl, err := template.New(headerName).Delims("[[", "]]").Parse(headerTemplate)
+		if err != nil {
+			return nil, err // Return error to prevent middleware creation
+		}
+		templates[headerName] = tmpl
+	}
+
 	return &MTlsOrWhitelist{
-		next:      next,
-		name:      name,
-		matchers:  config,
-		rawConfig: rawConfig,
+		next:           next,
+		name:           name,
+		matchers:       config,
+		rawConfig:      rawConfig,
+		requestHeaders: templates,
 	}, nil
 }
 
 func (a *MTlsOrWhitelist) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 	if req.TLS != nil && len(req.TLS.PeerCertificates) > 0 {
+		cert := req.TLS.PeerCertificates[0]
+
 		fmt.Println("Client Certificate: ", req.TLS.PeerCertificates[0].Subject)
-		req.Header.Set("X-Whitelist-Cert-SN", req.TLS.PeerCertificates[0].SerialNumber.String())
-		req.Header.Set("X-Whitelist-Cert-CN", req.TLS.PeerCertificates[0].Subject.CommonName)
+		req.Header.Set("X-Whitelist-Cert-SN", cert.SerialNumber.String())
+		req.Header.Set("X-Whitelist-Cert-CN", cert.Subject.CommonName)
+
+		// add additional headers if defined as requestHeaders
+		for headerName, tmpl := range a.requestHeaders {
+			var tplOutput bytes.Buffer
+			err := tmpl.Execute(&tplOutput, map[string]interface{}{"Cert": cert, "Req": req})
+			if err != nil {
+				fmt.Printf("Error executing template for header %s: %v\n", headerName, err)
+				continue // Skip this header if there's an error
+			}
+			req.Header.Set(headerName, tplOutput.String())
+		}
+
 		a.next.ServeHTTP(rw, req)
 		return
 	}
@@ -83,6 +111,18 @@ func (a *MTlsOrWhitelist) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 			return
 		}
 	}
+
+	// add additional headers if defined as requestHeaders
+	for headerName, tmpl := range a.requestHeaders {
+		var tplOutput bytes.Buffer
+		err := tmpl.Execute(&tplOutput, map[string]interface{}{"Req": req})
+		if err != nil {
+			fmt.Printf("Error executing template for header %s: %v\n", headerName, err)
+			continue // Skip this header if there's an error
+		}
+		req.Header.Set(headerName, tplOutput.String())
+	}
+
 	if a.matchers.NextUpdate != nil && a.matchers.NextUpdate.Before(time.Now()) {
 		go a.updateConfig()
 	}
