@@ -7,6 +7,9 @@ import: github.com/smerschjohann/mtlswhitelist
 summary: 'Either allow access based on mTLS or IP Whitelist'
 
 testData:
+  # adds custom headers to the backend (.Req and .Cert are passed to the templater)
+  requestHeaders:
+    X-Cert-Mail: "[[.Cert.Subject.CommonName]]@domain.tld"
   rules:
   - type: ipRange
     addInterface: true # adds the ip ranges of the default route to the whitelist
