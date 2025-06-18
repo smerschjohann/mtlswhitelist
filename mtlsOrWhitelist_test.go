@@ -68,6 +68,7 @@ func TestMTlsOrWhitelist_ServeHTTP(t *testing.T) {
 					Rules: []Rule{&RuleHeader{
 						Headers: map[string]string{},
 					}},
+					RejectCode: 403,
 				},
 				rawConfig: &RawConfig{
 					RequestHeaders: map[string]string{
@@ -113,6 +114,7 @@ func TestMTlsOrWhitelist_ServeHTTP(t *testing.T) {
 					Rules: []Rule{&RuleHeader{
 						Headers: map[string]string{},
 					}},
+					RejectCode: 403,
 				},
 				rawConfig: &RawConfig{
 					RequestHeaders: map[string]string{"X-Custom-Header": "staticvalue"},
@@ -143,6 +145,7 @@ func TestMTlsOrWhitelist_ServeHTTP(t *testing.T) {
 					Rules: []Rule{&RuleHeader{
 						Headers: map[string]string{"X-Non-Existent": ".+"},
 					}},
+					RejectCode: 403,
 				},
 				rawConfig: &RawConfig{},
 			},

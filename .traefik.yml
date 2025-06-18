@@ -7,6 +7,9 @@ import: github.com/smerschjohann/mtlswhitelist
 summary: 'Either allow access based on mTLS or IP Whitelist'
 
 testData:
+  rejectMessage:
+    message: Forbidden
+    code: 403
   # adds custom headers to the backend (.Req and .Cert are passed to the templater)
   requestHeaders:
     X-Cert-Mail: "[[.Cert.Subject.CommonName]]@domain.tld"

@@ -36,11 +36,17 @@ type ExternalData struct {
 	SkipTLSVerify bool              `json:"skipTlsVerify,omitempty"`
 }
 
+type RejectMessage struct {
+	Message string `json:"message"`
+	Code    int    `json:"code"`
+}
+
 type RawConfig struct {
 	Rules           []RawRule         `json:"rules"`
 	ExternalData    ExternalData      `json:"externalData,omitempty"`
 	RefreshInterval string            `json:"refreshInterval,omitempty"`
 	RequestHeaders  map[string]string `json:"requestHeaders,omitempty"`
+	RejectMessage   *RejectMessage    `json:"rejectMessage,omitempty"`
 }
 
 func CreateConfig() *RawConfig {
@@ -96,7 +102,7 @@ func (a *MTlsOrWhitelist) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 		}
 
 		if !allowed {
-			http.Error(rw, "Forbidden", http.StatusForbidden)
+			http.Error(rw, a.matchers.RejectMessage, a.matchers.RejectCode)
 			return
 		}
 	}

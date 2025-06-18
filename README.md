@@ -129,7 +129,15 @@ requestHeaders:
 
 In this example, the `X-Cert-Mail` header will be added to the request with the value of the client's Common Name from the certificate appended with "@domain.tld".
 
+### Reject Message
 
+The Middleware allows you to define a custom reject message that is shown, when the Middleware rejects the request. By default the following values are set:
+
+```yaml
+rejectMessage:
+  message: "Forbidden"
+  code: 403
+```
 
 ### Configuration Example
 
@@ -160,7 +168,7 @@ experimental:
   plugins:
     mtlswhitelist:
       moduleName: github.com/smerschjohann/mtlswhitelist
-      version: v0.0.1
+      version: v0.3.0
 
 #experimental:
 #  localPlugins:
@@ -190,6 +198,9 @@ http:
     mtlswhitelist:
       plugin:
         mtlswhitelist:
+          rejectMessage:
+            message: Forbidden
+            code: 403
           requestHeaders:
             X-Cert-Mail: "[[.Cert.Subject.CommonName]]@domain.tld"
           refreshInterval: 30m # if you are using files or external data you can update it periodically, skip if not required

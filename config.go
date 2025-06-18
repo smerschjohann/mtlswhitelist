@@ -37,9 +37,11 @@ type RuleNoneOf struct {
 }
 
 type Config struct {
-	CreationTime time.Time
-	NextUpdate   *time.Time
-	Rules        []Rule `json:"rules"`
+	CreationTime  time.Time
+	NextUpdate    *time.Time
+	Rules         []Rule `json:"rules"`
+	RejectMessage string
+	RejectCode    int
 }
 
 func (r *RuleAllOf) Init() error {
@@ -201,6 +203,17 @@ func NewConfig(rawConfig *RawConfig) (*Config, error) {
 		config.NextUpdate = &nextUpdate
 	} else {
 		config.NextUpdate = nil
+	}
+
+	if rawConfig.RejectMessage != nil {
+		config.RejectMessage = rawConfig.RejectMessage.Message
+		config.RejectCode = rawConfig.RejectMessage.Code
+	} else {
+		config.RejectMessage = "Forbidden"
+	}
+
+	if config.RejectCode <= 0 {
+		config.RejectCode = 403
 	}
 
 	return config, nil
