@@ -10,7 +10,7 @@ services:
       - "8140:8140"
     volumes:
       - "/run/user/1000/podman/podman.sock:/var/run/docker.sock:ro"
-      - "./config/traefik.yaml:/etc/traefik/traefik.yaml:roz"
+      - "./config/traefik.yaml:/etc/traefik/traefik.yaml:ro"
       - "./config:/config:ro"
       - "../:/plugins-local/src/github.com/smerschjohann/mtlswhitelist"
 

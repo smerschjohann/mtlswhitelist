@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 	"text/template"
 	"time"
@@ -41,20 +42,46 @@ type RejectMessage struct {
 	Code    int    `json:"code"`
 }
 
+type TwoFactor struct {
+	Enabled    bool              `json:"enabled,omitempty"`
+	RPID       string            `json:"rpid,omitempty"`
+	PathPrefix string            `json:"pathPrefix,omitempty"`
+	RPName     string            `json:"rpName,omitempty"`
+	CookieName string            `json:"cookieName,omitempty"`
+	CookieKey  string            `json:"cookieKey,omitempty"` // For signing/encryption
+	Users      map[string]interface{} `json:"users,omitempty"`     // Identity -> 2FA Data (TOTP secret or Passkey JSON)
+}
+
 type RawConfig struct {
 	Rules           []RawRule         `json:"rules"`
 	ExternalData    ExternalData      `json:"externalData,omitempty"`
 	RefreshInterval string            `json:"refreshInterval,omitempty"`
 	RequestHeaders  map[string]string `json:"requestHeaders,omitempty"`
 	RejectMessage   *RejectMessage    `json:"rejectMessage,omitempty"`
+	TwoFactor       TwoFactor         `json:"twoFactor,omitempty"`
 }
 
 func CreateConfig() *RawConfig {
-	return &RawConfig{}
+	return &RawConfig{
+		TwoFactor: TwoFactor{
+			PathPrefix: "/_mtls_2fa/",
+			CookieName: "mtls_2fa_session",
+		},
+	}
 }
 
 // New created a new Demo plugin.
 func New(ctx context.Context, next http.Handler, rawConfig *RawConfig, name string) (http.Handler, error) {
+	if rawConfig.TwoFactor.PathPrefix == "" {
+		rawConfig.TwoFactor.PathPrefix = "/_mtls_2fa/"
+	}
+	if rawConfig.TwoFactor.CookieName == "" {
+		rawConfig.TwoFactor.CookieName = "mtls_2fa_session"
+	}
+	if rawConfig.TwoFactor.Enabled && rawConfig.TwoFactor.CookieKey == "" {
+		return nil, fmt.Errorf("TwoFactor is enabled but no cookieKey is configured")
+	}
+
 	config, err := NewConfig(rawConfig)
 	if err != nil {
 		return nil, err
@@ -83,6 +110,12 @@ func New(ctx context.Context, next http.Handler, rawConfig *RawConfig, name stri
 }
 
 func (a *MTlsOrWhitelist) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
+	// Handle 2FA internal paths
+	if a.rawConfig != nil && a.rawConfig.TwoFactor.Enabled && strings.HasPrefix(req.URL.Path, a.rawConfig.TwoFactor.PathPrefix) {
+		a.Serve2FA(rw, req)
+		return
+	}
+
 	if req.TLS != nil && len(req.TLS.PeerCertificates) > 0 {
 		handleRequestsWithValidCert(req, a, rw)
 		return
@@ -103,6 +136,14 @@ func (a *MTlsOrWhitelist) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 
 		if !allowed {
 			http.Error(rw, a.matchers.RejectMessage, a.matchers.RejectCode)
+			return
+		}
+	}
+
+	// 2FA Check for non-mTLS (whitelist) users if enabled
+	if a.rawConfig != nil && a.rawConfig.TwoFactor.Enabled {
+		if !a.is2FAAuthenticated(req) {
+			a.redirectTo2FA(rw, req)
 			return
 		}
 	}
@@ -128,6 +169,14 @@ func handleRequestsWithValidCert(req *http.Request, a *MTlsOrWhitelist, rw http.
 	fmt.Println("Client Certificate: ", req.TLS.PeerCertificates[0].Subject)
 	req.Header.Set("X-Whitelist-Cert-Sn", cert.SerialNumber.String())
 	req.Header.Set("X-Whitelist-Cert-Cn", cert.Subject.CommonName)
+
+	// 2FA Check for mTLS users if enabled
+	if a.rawConfig != nil && a.rawConfig.TwoFactor.Enabled {
+		if !a.is2FAAuthenticated(req) {
+			a.redirectTo2FA(rw, req)
+			return
+		}
+	}
 
 	// add additional headers if defined as requestHeaders
 	for headerName, tmpl := range a.requestHeaders {

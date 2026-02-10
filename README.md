@@ -129,6 +129,43 @@ requestHeaders:
 
 In this example, the `X-Cert-Mail` header will be added to the request with the value of the client's Common Name from the certificate appended with "@domain.tld".
 
+### Two Factor Authentication (2FA)
+
+This plugin supports an optional second factor for authentication. When enabled, users must authenticate via TOTP or Passkey (WebAuthn) if they don't have a valid session cookie.
+
+#### Parameters
+
+- `enabled`: Boolean, enables or disables the 2FA requirement.
+- `pathPrefix`: The URL prefix for internal 2FA pages (default: `/_mtls_2fa/`).
+- `rpid`: The Relying Party ID for WebAuthn (usually your domain, e.g., `app.example.com`).
+- `rpName`: A human-readable name for your application shown during Passkey registration.
+- `cookieName`: Name of the session cookie (default: `mtls_2fa_session`).
+- `cookieKey`: **REQUIRED for Security**. A secret string used to sign and verify session cookies and WebAuthn challenges. Use a long, random string.
+- `users`: A map of `Identifier -> 2FA Data`. 
+
+> [!WARNING]
+> **Security Requirement**: You MUST configure a strong `cookieKey`. If missing, the middleware rejects all requests.
+    - *Identifier*: 
+        1. If mTLS is used: The Certificate **Common Name (CN)**.
+        2. If mTLS is used but CN is not found: The Certificate **Serial Number**.
+        3. If no certificate is used (IP Whitelist): The client's **IP Address** (or a matching **IP Range/CIDR**).
+    - *2FA Data*: A Base32 TOTP secret OR a JSON string containing Passkey data (Credential ID, Public Key).
+
+#### Registration Mode
+
+To generate the required Passkey configuration data, visit the registration page at `http(s)://your-app.com/_mtls_2fa/register`. After authenticating via mTLS, you can generate a new Passkey and copy the resulting JSON into your configuration.
+
+#### TOTP Configuration
+
+For TOTP, simply provide the Base32 secret for the user:
+
+```yaml
+twoFactor:
+  enabled: true
+  users:
+    "TestCN": "JBSWY3DPEHPK3PXP" # Base32 TOTP Secret
+```
+
 ### Reject Message
 
 The Middleware allows you to define a custom reject message that is shown, when the Middleware rejects the request. By default the following values are set:
@@ -221,6 +258,14 @@ http:
             headers:
               Custom-Header: "prefix.*"
               Second-Header: ".*" # this only checks if the header is present, it will reject if the header is not sent
+          twoFactor:
+            enabled: true
+            rpid: "localhost"
+            rpName: "My Local App"
+            users:
+              "TestCN": "JBSWY3DPEHPK3PXP" # Base32 TOTP Secret
+              # Or for Passkeys:
+              # "TestCN": "{\"credentialId\":\"...\",\"publicKey\":\"...\",\"alg\":-7}"
           
 
 tls:

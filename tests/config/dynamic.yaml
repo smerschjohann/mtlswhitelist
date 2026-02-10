@@ -17,6 +17,15 @@ http:
     mtlswhitelist:
       plugin:
         mtlswhitelist:
+          twoFactor:
+            enabled: true
+            rpid: "whoami.localhost.direct"
+            rpName: "Whoami App"
+            cookieKey: "secretz"
+            users:
+              "User":
+                - totp: "BFQQVEN7IR3XIASLCNPJ4Y33Z4VJWMKQ"
+
           refreshInterval: 30m # if you are using files or external data you can update it periodically, skip if not required
           rules:
           - type: ipRange
