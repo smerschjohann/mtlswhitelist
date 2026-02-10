@@ -4,6 +4,7 @@ package mtlswhitelist
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -43,12 +44,12 @@ type RejectMessage struct {
 }
 
 type TwoFactor struct {
-	Enabled    bool              `json:"enabled,omitempty"`
-	RPID       string            `json:"rpid,omitempty"`
-	PathPrefix string            `json:"pathPrefix,omitempty"`
-	RPName     string            `json:"rpName,omitempty"`
-	CookieName string            `json:"cookieName,omitempty"`
-	CookieKey  string            `json:"cookieKey,omitempty"` // For signing/encryption
+	Enabled    bool                   `json:"enabled,omitempty"`
+	RPID       string                 `json:"rpid,omitempty"`
+	PathPrefix string                 `json:"pathPrefix,omitempty"`
+	RPName     string                 `json:"rpName,omitempty"`
+	CookieName string                 `json:"cookieName,omitempty"`
+	CookieKey  string                 `json:"cookieKey,omitempty"` // For signing/encryption
 	Users      map[string]interface{} `json:"users,omitempty"`     // Identity -> 2FA Data (TOTP secret or Passkey JSON)
 }
 
@@ -79,7 +80,7 @@ func New(ctx context.Context, next http.Handler, rawConfig *RawConfig, name stri
 		rawConfig.TwoFactor.CookieName = "mtls_2fa_session"
 	}
 	if rawConfig.TwoFactor.Enabled && rawConfig.TwoFactor.CookieKey == "" {
-		return nil, fmt.Errorf("TwoFactor is enabled but no cookieKey is configured")
+		return nil, errors.New("TwoFactor is enabled but no cookieKey is configured")
 	}
 
 	config, err := NewConfig(rawConfig)
@@ -110,86 +111,89 @@ func New(ctx context.Context, next http.Handler, rawConfig *RawConfig, name stri
 }
 
 func (a *MTlsOrWhitelist) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
-	// Handle 2FA internal paths
+	// 1. Handle internal 2FA paths
+	if a.handleInternal2FA(rw, req) {
+		return
+	}
+
+	// 2. Handle mTLS users
+	if req.TLS != nil && len(req.TLS.PeerCertificates) > 0 {
+		a.handleRequestsWithValidCert(rw, req)
+		return
+	}
+
+	// 3. Handle Whitelist/2FA users
+	if a.handleWhitelistRequest(rw, req) {
+		a.applyRequestHeaders(req, nil)
+		a.updateConfigIfRequired()
+		a.next.ServeHTTP(rw, req)
+	}
+}
+
+func (a *MTlsOrWhitelist) handleInternal2FA(rw http.ResponseWriter, req *http.Request) bool {
 	if a.rawConfig != nil && a.rawConfig.TwoFactor.Enabled && strings.HasPrefix(req.URL.Path, a.rawConfig.TwoFactor.PathPrefix) {
 		a.Serve2FA(rw, req)
+		return true
+	}
+	return false
+}
+
+func (a *MTlsOrWhitelist) handleRequestsWithValidCert(rw http.ResponseWriter, req *http.Request) {
+	cert := req.TLS.PeerCertificates[0]
+
+	req.Header.Set("X-Whitelist-Cert-Sn", cert.SerialNumber.String())
+	req.Header.Set("X-Whitelist-Cert-Cn", cert.Subject.CommonName)
+
+	if !a.check2FA(rw, req) {
 		return
 	}
 
-	if req.TLS != nil && len(req.TLS.PeerCertificates) > 0 {
-		handleRequestsWithValidCert(req, a, rw)
-		return
-	}
+	a.applyRequestHeaders(req, cert)
+	a.next.ServeHTTP(rw, req)
+}
 
-	// if no cert provided and request is not from accepted ips, set SN to NoCert
+func (a *MTlsOrWhitelist) handleWhitelistRequest(rw http.ResponseWriter, req *http.Request) bool {
 	req.Header.Set("X-Whitelist-Cert-Sn", "NoCert")
 
 	allowed := a.matchers.Match(req)
 	if !allowed {
 		if a.matchers.NextUpdate != nil && a.matchers.NextUpdate.Before(time.Now()) {
-			err := a.updateConfig()
-			if err != nil {
-				fmt.Printf("error updating config: %v", err)
-			}
+			_ = a.updateConfig()
 			allowed = a.matchers.Match(req)
 		}
 
 		if !allowed {
 			http.Error(rw, a.matchers.RejectMessage, a.matchers.RejectCode)
-			return
+			return false
 		}
 	}
 
-	// 2FA Check for non-mTLS (whitelist) users if enabled
-	if a.rawConfig != nil && a.rawConfig.TwoFactor.Enabled {
-		if !a.is2FAAuthenticated(req) {
-			a.redirectTo2FA(rw, req)
-			return
-		}
-	}
-
-	// add additional headers if defined as requestHeaders
-	for headerName, tmpl := range a.requestHeaders {
-		var tplOutput bytes.Buffer
-		err := tmpl.Execute(&tplOutput, map[string]interface{}{"Req": req})
-		if err != nil {
-			fmt.Printf("Error executing template for header %s: %v\n", headerName, err)
-			continue // Skip this header if there's an error
-		}
-		req.Header.Set(headerName, tplOutput.String())
-	}
-
-	a.updateConfigIfRequired()
-	a.next.ServeHTTP(rw, req)
+	return a.check2FA(rw, req)
 }
 
-func handleRequestsWithValidCert(req *http.Request, a *MTlsOrWhitelist, rw http.ResponseWriter) {
-	cert := req.TLS.PeerCertificates[0]
-
-	fmt.Println("Client Certificate: ", req.TLS.PeerCertificates[0].Subject)
-	req.Header.Set("X-Whitelist-Cert-Sn", cert.SerialNumber.String())
-	req.Header.Set("X-Whitelist-Cert-Cn", cert.Subject.CommonName)
-
-	// 2FA Check for mTLS users if enabled
+func (a *MTlsOrWhitelist) check2FA(rw http.ResponseWriter, req *http.Request) bool {
 	if a.rawConfig != nil && a.rawConfig.TwoFactor.Enabled {
 		if !a.is2FAAuthenticated(req) {
 			a.redirectTo2FA(rw, req)
-			return
+			return false
 		}
 	}
+	return true
+}
 
-	// add additional headers if defined as requestHeaders
+func (a *MTlsOrWhitelist) applyRequestHeaders(req *http.Request, cert interface{}) {
 	for headerName, tmpl := range a.requestHeaders {
 		var tplOutput bytes.Buffer
-		err := tmpl.Execute(&tplOutput, map[string]interface{}{"Cert": cert, "Req": req})
-		if err != nil {
+		data := map[string]interface{}{"Req": req}
+		if cert != nil {
+			data["Cert"] = cert
+		}
+		if err := tmpl.Execute(&tplOutput, data); err != nil {
 			fmt.Printf("Error executing template for header %s: %v\n", headerName, err)
-			continue // Skip this header if there's an error
+			continue
 		}
 		req.Header.Set(headerName, tplOutput.String())
 	}
-
-	a.next.ServeHTTP(rw, req)
 }
 
 func (a *MTlsOrWhitelist) updateConfigIfRequired() {

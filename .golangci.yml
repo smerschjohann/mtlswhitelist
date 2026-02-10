@@ -60,6 +60,8 @@ issues:
     - path: .+.go
       linters:
       - revive
+      - tenv
+
     - path: (.+)_test.go
       linters:
         - goconst

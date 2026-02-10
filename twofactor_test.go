@@ -6,6 +6,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/base32"
 	"encoding/json"
+	"net/http"
 	"net/http/httptest"
 	"testing"
 )
@@ -26,7 +27,7 @@ func TestMTlsOrWhitelist_getUserData_Multi(t *testing.T) {
 	a := &MTlsOrWhitelist{rawConfig: rawConfig}
 
 	t.Run("UserA - Multi", func(t *testing.T) {
-		req := httptest.NewRequest("GET", "/", nil)
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
 		req.RemoteAddr = "1.2.3.4:1234"
 		// Simulate CN match
 		req.TLS = &tls.ConnectionState{
@@ -45,7 +46,7 @@ func TestMTlsOrWhitelist_getUserData_Multi(t *testing.T) {
 	})
 
 	t.Run("UserB - Single String", func(t *testing.T) {
-		req := httptest.NewRequest("GET", "/", nil)
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
 		req.RemoteAddr = "UserB:1234" // Mocking simple match
 
 		data, id, ok := a.getUserData(req)
@@ -58,7 +59,7 @@ func TestMTlsOrWhitelist_getUserData_Multi(t *testing.T) {
 	})
 
 	t.Run("UserC - Single Object", func(t *testing.T) {
-		req := httptest.NewRequest("GET", "/", nil)
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
 		req.RemoteAddr = "UserC:1234"
 
 		data, id, ok := a.getUserData(req)

@@ -5,7 +5,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/hmac"
 	"crypto/rand"
-	"crypto/sha1"
+	"crypto/sha1" //nolint:gosec // SHA1 is required for TOTP
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base32"
@@ -20,8 +20,19 @@ import (
 	"time"
 )
 
-// Session payload: "identity:nonce:timestamp"
-const sessionPayloadVersion = "v1"
+// Session payload: "identity:nonce:timestamp".
+const (
+	sessionPayloadVersion = "v1"
+	nonceSize             = 16
+	secretSize            = 20
+	challengeSize         = 32
+	maxTimeDrift          = 24 * time.Hour
+	challengeExpiry       = 5 * time.Minute
+	totpTimeHeader        = 8
+	totpMod               = 1000000
+	totpStep              = 30
+	webAuthnTimeout       = 60000
+)
 
 func (a *MTlsOrWhitelist) is2FAAuthenticated(req *http.Request) bool {
 	cookie, err := req.Cookie(a.rawConfig.TwoFactor.CookieName)
@@ -50,7 +61,7 @@ func (a *MTlsOrWhitelist) is2FAAuthenticated(req *http.Request) bool {
 
 	// Verify timestamp
 	timestamp, err := time.Parse(time.RFC3339, timestampStr)
-	if err != nil || time.Since(timestamp) > 24*time.Hour {
+	if err != nil || time.Since(timestamp) > maxTimeDrift {
 		return false
 	}
 
@@ -72,8 +83,8 @@ func (a *MTlsOrWhitelist) verifyValue(signedValue string) (string, bool) {
 	if a.rawConfig.TwoFactor.CookieKey == "" {
 		return "", false
 	}
-	parts := strings.SplitN(signedValue, ".", 2)
-	if len(parts) != 2 {
+	parts := strings.SplitN(signedValue, ".", 2) //nolint:mnd
+	if len(parts) != 2 {                         //nolint:mnd
 		return "", false
 	}
 	sig, err := base64.StdEncoding.DecodeString(parts[0])
@@ -91,15 +102,15 @@ func (a *MTlsOrWhitelist) verifyValue(signedValue string) (string, bool) {
 }
 
 func (a *MTlsOrWhitelist) getSessionPayload(identity string) string {
-	nonce := make([]byte, 16)
+	nonce := make([]byte, nonceSize)
 	if _, err := rand.Read(nonce); err != nil {
-		// Should never happen with crypto/rand
+		panic(err)
 	}
 	nonceB64 := base64.StdEncoding.EncodeToString(nonce)
 	return fmt.Sprintf("%s|%s|%s|%s", sessionPayloadVersion, identity, nonceB64, time.Now().Format(time.RFC3339))
 }
 
-func (a *MTlsOrWhitelist) getUserData(req *http.Request) (data []string, canonicalID string, ok bool) {
+func (a *MTlsOrWhitelist) getUserData(req *http.Request) ([]string, string, bool) {
 	// 1. Detect base identities
 	identities := []string{}
 	if req.TLS != nil && len(req.TLS.PeerCertificates) > 0 {
@@ -111,7 +122,6 @@ func (a *MTlsOrWhitelist) getUserData(req *http.Request) (data []string, canonic
 		clientIP = req.RemoteAddr
 	}
 	identities = append(identities, clientIP)
-	
 
 	// 2. Try matching
 	for _, id := range identities {
@@ -141,81 +151,82 @@ func (a *MTlsOrWhitelist) getUserData(req *http.Request) (data []string, canonic
 
 func (a *MTlsOrWhitelist) convertUserData(val interface{}) []string {
 	var result []string
-	
+
 	processItem := func(item interface{}) {
 		if item == nil {
 			return
 		}
 
-		// Handle many map types that Yaegi might use
-		itemMap := make(map[string]interface{})
-		isMap := false
-		
+		// Handle simple types first
 		switch v := item.(type) {
 		case string:
-			trimmed := strings.Trim(strings.TrimSpace(v), "\"'")
-			result = append(result, trimmed)
+			result = append(result, strings.Trim(strings.TrimSpace(v), "\"'"))
 			return
 		case []byte:
-			s := string(v)
-			trimmed := strings.Trim(strings.TrimSpace(s), "\"'")
-			result = append(result, trimmed)
+			result = append(result, strings.Trim(strings.TrimSpace(string(v)), "\"'"))
 			return
-		case map[string]interface{}:
-			itemMap = v
-			isMap = true
-		case map[interface{}]interface{}:
-			for mk, mv := range v {
-				itemMap[fmt.Sprintf("%v", mk)] = mv
-			}
-			isMap = true
 		}
 
+		// Handle map types (Yaegi support)
+		itemMap, isMap := a.extractMap(item)
 		if isMap {
-			// Check for TOTP-in-map format first
-			if totp, ok := itemMap["totp"].(string); ok {
-				trimmed := strings.Trim(strings.TrimSpace(totp), "\"'")
-				result = append(result, trimmed)
-				return
-			}
-			if secret, ok := itemMap["secret"].(string); ok {
-				trimmed := strings.Trim(strings.TrimSpace(secret), "\"'")
-				result = append(result, trimmed)
+			if s, found := a.extractSecret(itemMap); found {
+				result = append(result, s)
 				return
 			}
 
-			// Otherwise, treat as Passkey (marshal)
-			cleaned := a.cleanUpForJSON(item)
-			b, err := json.Marshal(cleaned)
-			if err == nil {
+			// Treat as Passkey
+			if b, err := json.Marshal(a.cleanUpForJSON(item)); err == nil {
 				result = append(result, string(b))
 			}
 			return
 		}
 
-		// Fallback for other possible types
+		// Fallback for other types
 		s := fmt.Sprintf("%v", item)
 		if strings.HasPrefix(s, "{") || strings.HasPrefix(s, "map[") {
-			// Looks like a map/struct that wasn't caught by type switch
-			cleaned := a.cleanUpForJSON(item)
-			b, _ := json.Marshal(cleaned)
-			result = append(result, string(b))
+			if b, err := json.Marshal(a.cleanUpForJSON(item)); err == nil {
+				result = append(result, string(b))
+			}
 		} else {
-			trimmed := strings.Trim(strings.TrimSpace(s), "\"'")
-			result = append(result, trimmed)
+			result = append(result, strings.Trim(strings.TrimSpace(s), "\"'"))
 		}
 	}
 
-	switch v := val.(type) {
-	case []interface{}:
+	if v, ok := val.([]interface{}); ok {
 		for _, item := range v {
 			processItem(item)
 		}
-	default:
+	} else {
 		processItem(val)
 	}
 
 	return result
+}
+
+func (a *MTlsOrWhitelist) extractMap(item interface{}) (map[string]interface{}, bool) {
+	switch v := item.(type) {
+	case map[string]interface{}:
+		return v, true
+	case map[interface{}]interface{}:
+		itemMap := make(map[string]interface{})
+		for mk, mv := range v {
+			itemMap[fmt.Sprintf("%v", mk)] = mv
+		}
+		return itemMap, true
+	default:
+		return nil, false
+	}
+}
+
+func (a *MTlsOrWhitelist) extractSecret(itemMap map[string]interface{}) (string, bool) {
+	if totp, ok := itemMap["totp"].(string); ok {
+		return strings.Trim(strings.TrimSpace(totp), "\"'"), true
+	}
+	if secret, ok := itemMap["secret"].(string); ok {
+		return strings.Trim(strings.TrimSpace(secret), "\"'"), true
+	}
+	return "", false
 }
 
 func (a *MTlsOrWhitelist) cleanUpForJSON(i interface{}) interface{} {
@@ -272,7 +283,6 @@ func (a *MTlsOrWhitelist) Serve2FA(rw http.ResponseWriter, req *http.Request) {
 	http.NotFound(rw, req)
 }
 
-
 func (a *MTlsOrWhitelist) handleVerifyTOTP(rw http.ResponseWriter, req *http.Request) {
 	err := req.ParseForm()
 	if err != nil {
@@ -304,17 +314,17 @@ func (a *MTlsOrWhitelist) handleVerifyTOTP(rw http.ResponseWriter, req *http.Req
 				HttpOnly: true,
 				Secure:   true,
 				SameSite: http.SameSiteLaxMode,
-				Expires:  time.Now().Add(24 * time.Hour),
+				Expires:  time.Now().Add(maxTimeDrift),
 			})
 			http.Redirect(rw, req, redirect, http.StatusFound)
 			return
 		}
 	}
-	
+
 	http.Error(rw, "Invalid code", http.StatusUnauthorized)
 }
 
-func (a *MTlsOrWhitelist) VerifyTOTP(code string, secret string) bool {
+func (a *MTlsOrWhitelist) VerifyTOTP(code, secret string) bool {
 	// Secret might be padded base32
 	secret = strings.ToUpper(strings.TrimSpace(secret))
 	key, err := base32.StdEncoding.WithPadding(base32.NoPadding).DecodeString(secret)
@@ -327,12 +337,12 @@ func (a *MTlsOrWhitelist) VerifyTOTP(code string, secret string) bool {
 
 	// Hotp(K, T) = Truncate(HMAC-SHA-1(K, T))
 	// T = (Current Time - T0) / X
-	t := time.Now().Unix() / 30
+	t := time.Now().Unix() / totpStep
 	c0 := a.getOTP(key, t)
 	cm1 := a.getOTP(key, t-1)
 	cp1 := a.getOTP(key, t+1)
-	cm2 := a.getOTP(key, t-2)
-	cp2 := a.getOTP(key, t+2)
+	cm2 := a.getOTP(key, t-2) //nolint:mnd
+	cp2 := a.getOTP(key, t+2) //nolint:mnd
 
 	res := (c0 == code || cm1 == code || cp1 == code || cm2 == code || cp2 == code)
 	if !res {
@@ -342,39 +352,40 @@ func (a *MTlsOrWhitelist) VerifyTOTP(code string, secret string) bool {
 }
 
 func (a *MTlsOrWhitelist) getOTP(key []byte, t int64) string {
-	buf := make([]byte, 8)
-	binary.BigEndian.PutUint64(buf, uint64(t))
+	buf := make([]byte, totpTimeHeader)
+	binary.BigEndian.PutUint64(buf, uint64(t)) // #nosec G115
 
+	// #nosec G505 -- SHA1 is used for TOTP (RFC 6238) which is the industry standard
 	mac := hmac.New(sha1.New, key)
-	mac.Write(buf)
+	_, _ = mac.Write(buf)
 	sum := mac.Sum(nil)
 
-	offset := sum[len(sum)-1] & 0xf
-	binaryCode := (uint32(sum[offset])&0x7f)<<24 |
-		(uint32(sum[offset+1])&0xff)<<16 |
-		(uint32(sum[offset+2])&0xff)<<8 |
-		(uint32(sum[offset+3]) & 0xff)
+	offset := sum[len(sum)-1] & 0xf                //nolint:mnd
+	binaryCode := (uint32(sum[offset])&0x7f)<<24 | //nolint:mnd
+		(uint32(sum[offset+1])&0xff)<<16 | //nolint:mnd
+		(uint32(sum[offset+2])&0xff)<<8 | //nolint:mnd
+		(uint32(sum[offset+3]) & 0xff) //nolint:mnd
 
-	otp := binaryCode % 1000000
+	otp := binaryCode % totpMod
 	return fmt.Sprintf("%06d", otp)
 }
 
-
 func (a *MTlsOrWhitelist) checkTOTP(key []byte, t int64, code string) bool {
-	buf := make([]byte, 8)
-	binary.BigEndian.PutUint64(buf, uint64(t))
+	buf := make([]byte, totpTimeHeader)
+	binary.BigEndian.PutUint64(buf, uint64(t)) // #nosec G115
 
+	// #nosec G505 -- SHA1 is used for TOTP (RFC 6238) which is the industry standard
 	mac := hmac.New(sha1.New, key)
-	mac.Write(buf)
+	_, _ = mac.Write(buf)
 	sum := mac.Sum(nil)
 
-	offset := sum[len(sum)-1] & 0xf
-	binaryCode := (uint32(sum[offset])&0x7f)<<24 |
-		(uint32(sum[offset+1])&0xff)<<16 |
-		(uint32(sum[offset+2])&0xff)<<8 |
-		(uint32(sum[offset+3]) & 0xff)
+	offset := sum[len(sum)-1] & 0xf                //nolint:mnd
+	binaryCode := (uint32(sum[offset])&0x7f)<<24 | //nolint:mnd
+		(uint32(sum[offset+1])&0xff)<<16 | //nolint:mnd
+		(uint32(sum[offset+2])&0xff)<<8 | //nolint:mnd
+		(uint32(sum[offset+3]) & 0xff) //nolint:mnd
 
-	otp := binaryCode % 1000000
+	otp := binaryCode % totpMod
 	return fmt.Sprintf("%06d", otp) == code
 }
 
@@ -406,7 +417,7 @@ func (a *MTlsOrWhitelist) handleWebAuthnChallenge(rw http.ResponseWriter, req *h
 	}
 
 	// Generate random challenge
-	challenge := make([]byte, 32)
+	challenge := make([]byte, challengeSize)
 	if _, err := rand.Read(challenge); err != nil {
 		http.Error(rw, "internal error", http.StatusInternalServerError)
 		return
@@ -423,7 +434,7 @@ func (a *MTlsOrWhitelist) handleWebAuthnChallenge(rw http.ResponseWriter, req *h
 		HttpOnly: true,
 		Secure:   true,
 		SameSite: http.SameSiteLaxMode,
-		Expires:  time.Now().Add(5 * time.Minute),
+		Expires:  time.Now().Add(challengeExpiry),
 	})
 
 	options := map[string]interface{}{
@@ -432,12 +443,14 @@ func (a *MTlsOrWhitelist) handleWebAuthnChallenge(rw http.ResponseWriter, req *h
 			"rpId":             a.rawConfig.TwoFactor.RPID,
 			"allowCredentials": allowCredentials,
 			"userVerification": "preferred",
-			"timeout":          60000,
+			"timeout":          webAuthnTimeout,
 		},
 	}
 
 	rw.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(rw).Encode(options)
+	if err := json.NewEncoder(rw).Encode(options); err != nil {
+		fmt.Printf("Error encoding WebAuthn challenge: %v\n", err)
+	}
 }
 
 func (a *MTlsOrWhitelist) handleWebAuthnVerify(rw http.ResponseWriter, req *http.Request) {
@@ -448,10 +461,41 @@ func (a *MTlsOrWhitelist) handleWebAuthnVerify(rw http.ResponseWriter, req *http
 	}
 
 	// 1. Verify challenge
+	challengeB64, canonicalID, ok := a.verifyWebAuthnChallenge(rw, req)
+	if !ok {
+		return
+	}
+
+	// 2. Parse and verify clientDataJSON
+	clientDataBytes, err := base64.StdEncoding.DecodeString(verifyReq.Response.ClientDataJSON)
+	if err != nil {
+		http.Error(rw, "invalid clientDataJSON", http.StatusForbidden)
+		return
+	}
+
+	var clientData ClientDataJSON
+	if err := json.Unmarshal(clientDataBytes, &clientData); err != nil {
+		http.Error(rw, "invalid clientDataJSON", http.StatusForbidden)
+		return
+	}
+
+	if !a.verifyClientData(rw, &clientData, challengeB64) {
+		return
+	}
+
+	// 3. Try to verify against any of the user's registered passkeys
+	if a.verifyPasskeyResponse(rw, req, &verifyReq, clientDataBytes, canonicalID) {
+		return
+	}
+
+	http.Error(rw, "passkey verification failed", http.StatusForbidden)
+}
+
+func (a *MTlsOrWhitelist) verifyWebAuthnChallenge(rw http.ResponseWriter, req *http.Request) (string, string, bool) {
 	challengeCookie, err := req.Cookie("webauthn_challenge")
 	if err != nil {
 		http.Error(rw, "missing challenge", http.StatusForbidden)
-		return
+		return "", "", false
 	}
 
 	// Delete challenge cookie after reading it
@@ -468,48 +512,37 @@ func (a *MTlsOrWhitelist) handleWebAuthnVerify(rw http.ResponseWriter, req *http
 	payload, ok := a.verifyValue(challengeCookie.Value)
 	if !ok {
 		http.Error(rw, "invalid challenge signature", http.StatusForbidden)
-		return
+		return "", "", false
 	}
 
 	parts := strings.Split(payload, "|")
-	if len(parts) != 3 {
+	if len(parts) != 3 { //nolint:mnd
 		http.Error(rw, "invalid challenge payload", http.StatusForbidden)
-		return
-	}
-	challengeB64 := parts[0]
-	challengeIdentity := parts[1]
-	challengeTimestampStr := parts[2]
-
-	// 2. Identify current user
-	userDataList, canonicalID, ok := a.getUserData(req)
-	if !ok {
-		http.Error(rw, "user not found", http.StatusForbidden)
-		return
+		return "", "", false
 	}
 
-	// Verify challenge identity matches current
-	if challengeIdentity != canonicalID {
-		http.Error(rw, "challenge identity mismatch", http.StatusForbidden)
-		return
-	}
-
-	// Verify challenge timestamp
-	challengeTimestamp, err := time.Parse(time.RFC3339, challengeTimestampStr)
-	if err != nil || time.Since(challengeTimestamp) > 5*time.Minute {
+	challengeTimestamp, err := time.Parse(time.RFC3339, parts[2])
+	if err != nil || time.Since(challengeTimestamp) > challengeExpiry {
 		http.Error(rw, "challenge expired", http.StatusForbidden)
-		return
+		return "", "", false
 	}
 
-	// 3. Parse and verify clientDataJSON
-	clientDataBytes, _ := base64.StdEncoding.DecodeString(verifyReq.Response.ClientDataJSON)
-	var clientData ClientDataJSON
-	json.Unmarshal(clientDataBytes, &clientData)
+	// Identify current user
+	_, canonicalID, ok := a.getUserData(req)
+	if !ok || parts[1] != canonicalID {
+		http.Error(rw, "user mismatch or not found", http.StatusForbidden)
+		return "", "", false
+	}
 
+	return parts[0], canonicalID, true
+}
+
+func (a *MTlsOrWhitelist) verifyClientData(rw http.ResponseWriter, clientData *ClientDataJSON, challengeB64 string) bool {
 	if clientData.Type != "webauthn.get" {
 		http.Error(rw, "invalid type", http.StatusForbidden)
-		return
+		return false
 	}
-	// Challenges in clientDataJSON are base64url encoded
+
 	clientChallengeBytes, _ := base64.RawURLEncoding.DecodeString(clientData.Challenge)
 	if len(clientChallengeBytes) == 0 {
 		clientChallengeBytes, _ = base64.StdEncoding.DecodeString(clientData.Challenge)
@@ -518,38 +551,28 @@ func (a *MTlsOrWhitelist) handleWebAuthnVerify(rw http.ResponseWriter, req *http
 
 	if !bytes.Equal(clientChallengeBytes, cookieChallengeBytes) {
 		http.Error(rw, "challenge mismatch", http.StatusForbidden)
-		return
+		return false
 	}
+	return true
+}
 
-	// 4. Try to verify against any of the user's registered passkeys
+func (a *MTlsOrWhitelist) verifyPasskeyResponse(rw http.ResponseWriter, req *http.Request, verifyReq *WebAuthnVerifyRequest, clientDataBytes []byte, canonicalID string) bool {
+	userDataList, _, _ := a.getUserData(req)
+
 	authDataBytes, _ := base64.StdEncoding.DecodeString(verifyReq.Response.AuthenticatorData)
 	clientDataHash := sha256.Sum256(clientDataBytes)
-	signedData := append(authDataBytes, clientDataHash[:]...)
+	signedData := append([]byte{}, authDataBytes...)
+	signedData = append(signedData, clientDataHash[:]...)
 	signature, _ := base64.StdEncoding.DecodeString(verifyReq.Response.Signature)
 	dataHash := sha256.Sum256(signedData)
 
 	for _, userData := range userDataList {
 		var passkey map[string]interface{}
-		err = json.Unmarshal([]byte(userData), &passkey)
-		if err != nil {
+		if err := json.Unmarshal([]byte(userData), &passkey); err != nil {
 			continue
 		}
 
-		// Double check algorithm if provided
-		alg := -7 // Default ES256
-		if v, ok := passkey["alg"]; ok {
-			switch tv := v.(type) {
-			case int:
-				alg = tv
-			case float64:
-				alg = int(tv)
-			case string:
-				if i, err := strconv.Atoi(tv); err == nil {
-					alg = i
-				}
-			}
-		}
-		if alg != -7 {
+		if !a.isCorrectAlgorithm(passkey) {
 			continue
 		}
 
@@ -560,32 +583,46 @@ func (a *MTlsOrWhitelist) handleWebAuthnVerify(rw http.ResponseWriter, req *http
 			continue
 		}
 
-		ecdsaPubKey, ok := pubKey.(*ecdsa.PublicKey)
-		if !ok {
-			continue
-		}
-
-		if ecdsa.VerifyASN1(ecdsaPubKey, dataHash[:], signature) {
-			// Success!
-			sessionPayload := a.getSessionPayload(canonicalID)
-			http.SetCookie(rw, &http.Cookie{
-				Name:     a.rawConfig.TwoFactor.CookieName,
-				Value:    a.signValue(sessionPayload),
-				Path:     "/",
-				HttpOnly: true,
-				Secure:   true,
-				SameSite: http.SameSiteLaxMode,
-				Expires:  time.Now().Add(24 * time.Hour),
-			})
-			rw.WriteHeader(http.StatusOK)
-			return
+		if ecdsaPubKey, ok := pubKey.(*ecdsa.PublicKey); ok {
+			if ecdsa.VerifyASN1(ecdsaPubKey, dataHash[:], signature) {
+				a.setSessionCookie(rw, canonicalID)
+				return true
+			}
 		}
 	}
-
-	http.Error(rw, "passkey verification failed", http.StatusForbidden)
+	return false
 }
 
+func (a *MTlsOrWhitelist) isCorrectAlgorithm(passkey map[string]interface{}) bool {
+	alg := -7 //nolint:mnd // Default ES256
+	if v, ok := passkey["alg"]; ok {
+		switch tv := v.(type) {
+		case int:
+			alg = tv
+		case float64:
+			alg = int(tv)
+		case string:
+			if i, err := strconv.Atoi(tv); err == nil {
+				alg = i
+			}
+		}
+	}
+	return alg == -7
+}
 
+func (a *MTlsOrWhitelist) setSessionCookie(rw http.ResponseWriter, canonicalID string) {
+	sessionPayload := a.getSessionPayload(canonicalID)
+	http.SetCookie(rw, &http.Cookie{
+		Name:     a.rawConfig.TwoFactor.CookieName,
+		Value:    a.signValue(sessionPayload),
+		Path:     "/",
+		HttpOnly: true,
+		Secure:   true,
+		SameSite: http.SameSiteLaxMode,
+		Expires:  time.Now().Add(maxTimeDrift),
+	})
+	rw.WriteHeader(http.StatusOK)
+}
 
 type WebAuthnVerifyRequest struct {
 	ID       string `json:"id"`
@@ -593,7 +630,7 @@ type WebAuthnVerifyRequest struct {
 	Type     string `json:"type"`
 	Response struct {
 		AuthenticatorData string `json:"authenticatorData"`
-		ClientDataJSON    string `json:"clientDataJSON"`
+		ClientDataJSON    string `json:"clientDataJson"`
 		Signature         string `json:"signature"`
 		UserHandle        string `json:"userHandle"`
 	} `json:"response"`
@@ -604,6 +641,3 @@ type ClientDataJSON struct {
 	Challenge string `json:"challenge"`
 	Origin    string `json:"origin"`
 }
-
-
-

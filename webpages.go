@@ -100,7 +100,9 @@ func (a *MTlsOrWhitelist) serveLoginPage(rw http.ResponseWriter, req *http.Reque
 </body>
 </html>`
 	rw.Header().Set("Content-Type", "text/html")
-	rw.Write([]byte(html))
+	if _, err := rw.Write([]byte(html)); err != nil {
+		fmt.Printf("Error writing login page: %v\n", err)
+	}
 }
 
 func (a *MTlsOrWhitelist) serveRegisterPage(rw http.ResponseWriter, req *http.Request) {
@@ -236,13 +238,15 @@ func (a *MTlsOrWhitelist) serveRegisterPage(rw http.ResponseWriter, req *http.Re
 </body>
 </html>
 `, identity, cn, sn, ip, totpSecret, otpAuthURL, a.rawConfig.TwoFactor.RPName, a.rawConfig.TwoFactor.RPID, identity, identity, identity, identity, totpSecret)
-	rw.Write([]byte(html))
+	if _, err := rw.Write([]byte(html)); err != nil {
+		fmt.Printf("Error writing register page: %v\n", err)
+	}
 }
 
 func (a *MTlsOrWhitelist) generateTOTPSecret() string {
-	secret := make([]byte, 20)
+	secret := make([]byte, secretSize)
 	if _, err := rand.Read(secret); err != nil {
-		// crypto/rand doesn't fail usually
+		panic(err)
 	}
 	return base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(secret)
 }
