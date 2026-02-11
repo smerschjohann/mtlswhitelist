@@ -269,13 +269,18 @@ func (a *MTlsOrWhitelist) redirectTo2FA(rw http.ResponseWriter, req *http.Reques
 	identity := a.detectIdentity(req)
 	hasCredentials := false
 	if a.userStore != nil {
-		_, hasCredentials, _ = a.userStore.GetUserData(identity)
+		var err error
+		_, hasCredentials, err = a.userStore.GetUserData(identity)
+		if err != nil {
+			fmt.Printf("[2FA] Error checking credentials for %s: %v. Redirecting to login for safety.\n", identity, err)
+			hasCredentials = true // Default to login on error to be conservative
+		}
 	} else {
 		fmt.Println("[2FA] Warning: userStore is nil during redirect check")
 	}
 
 	if !hasCredentials {
-		// New user — send to register page
+		// New user or error — send to register page
 		registerURL := a.rawConfig.TwoFactor.PathPrefix + "register?redirect=" + req.URL.String()
 		http.Redirect(rw, req, registerURL, http.StatusFound)
 		return

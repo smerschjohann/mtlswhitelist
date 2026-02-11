@@ -47,13 +47,14 @@ type RejectMessage struct {
 }
 
 type UserStoreConfig struct {
-	Type            string `json:"type,omitempty"`            // "config" (default), "kubernetes", "valkey"
-	SecretName      string `json:"secretName,omitempty"`      // Kubernetes: secret name
-	SecretNamespace string `json:"secretNamespace,omitempty"` // Kubernetes: namespace (auto-detected if empty)
-	Address         string `json:"address,omitempty"`         // Valkey: host:port
-	Password        string `json:"password,omitempty"`        // Valkey: AUTH password
-	DB              int    `json:"db,omitempty"`              // Valkey: database number
-	KeyPrefix       string `json:"keyPrefix,omitempty"`       // Valkey: key prefix (default: "2fa:")
+	Type               string `json:"type,omitempty"`               // "config" (default), "kubernetes", "valkey"
+	SecretName         string `json:"secretName,omitempty"`         // Kubernetes: secret name
+	SecretNamespace    string `json:"secretNamespace,omitempty"`    // Kubernetes: namespace (auto-detected if empty)
+	InsecureSkipVerify bool   `json:"insecureSkipVerify,omitempty"` // TLS: skip certificate verification
+	Address            string `json:"address,omitempty"`            // Valkey: host:port
+	Password           string `json:"password,omitempty"`           // Valkey: AUTH password
+	DB                 int    `json:"db,omitempty"`                 // Valkey: database number
+	KeyPrefix          string `json:"keyPrefix,omitempty"`          // Valkey: key prefix (default: "2fa:")
 }
 
 type TwoFactor struct {
@@ -147,6 +148,7 @@ func initUserStore(rawConfig *RawConfig) (UserStore, error) {
 		return newKubernetesUserStore(
 			rawConfig.TwoFactor.UserStore.SecretName,
 			rawConfig.TwoFactor.UserStore.SecretNamespace,
+			rawConfig.TwoFactor.UserStore.InsecureSkipVerify,
 		)
 	case "valkey":
 		fmt.Printf("[2FA] Using Valkey user store at %s\n", rawConfig.TwoFactor.UserStore.Address)

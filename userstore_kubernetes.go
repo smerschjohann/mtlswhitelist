@@ -2,6 +2,7 @@ package mtlswhitelist
 
 import (
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -15,7 +16,7 @@ import (
 	"time"
 )
 
-const (
+var (
 	k8sTokenPath     = "/var/run/secrets/kubernetes.io/serviceaccount/token" //nolint:gosec // not a credential, but a path to the token file
 	k8sCACertPath    = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
 	k8sNamespacePath = "/var/run/secrets/kubernetes.io/serviceaccount/namespace"
@@ -38,7 +39,7 @@ type kubernetesUserStore struct {
 
 func (s *kubernetesUserStore) Type() string { return "kubernetes" }
 
-func newKubernetesUserStore(secretName, secretNamespace string) (*kubernetesUserStore, error) {
+func newKubernetesUserStore(secretName, secretNamespace string, insecureSkipVerify bool) (*kubernetesUserStore, error) {
 	host := os.Getenv("KUBERNETES_SERVICE_HOST")
 	port := os.Getenv("KUBERNETES_SERVICE_PORT")
 	if host == "" || port == "" {
@@ -64,11 +65,17 @@ func newKubernetesUserStore(secretName, secretNamespace string) (*kubernetesUser
 	}
 
 	// Load CA cert for in-cluster TLS
-	tlsConfig := &tls.Config{MinVersion: tls.VersionTLS12}
-	caCert, err := os.ReadFile(k8sCACertPath)
-	if err == nil && len(caCert) > 0 {
-		// CA cert available; we trust the in-cluster CA
-		tlsConfig.InsecureSkipVerify = false
+	tlsConfig := &tls.Config{MinVersion: tls.VersionTLS12} //nolint:gosec // MinVersion is TLS 1.2
+	if insecureSkipVerify {
+		tlsConfig.InsecureSkipVerify = true
+	} else {
+		caCert, err := os.ReadFile(k8sCACertPath)
+		if err == nil && len(caCert) > 0 {
+			roots := x509.NewCertPool()
+			if ok := roots.AppendCertsFromPEM(caCert); ok {
+				tlsConfig.RootCAs = roots
+			}
+		}
 	}
 
 	client := &http.Client{
@@ -96,15 +103,15 @@ func (s *kubernetesUserStore) secretURL() string {
 	return fmt.Sprintf("%s/api/v1/namespaces/%s/secrets/%s", s.apiHost, s.namespace, s.name)
 }
 
-func (s *kubernetesUserStore) doRequest(method, url string, body io.Reader, contentType string) ([]byte, error) {
+func (s *kubernetesUserStore) doRequest(method, url string, body io.Reader, contentType string) ([]byte, int, error) {
 	req, err := http.NewRequest(method, url, body)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
 	token, err := s.getToken()
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	if contentType != "" {
@@ -113,20 +120,20 @@ func (s *kubernetesUserStore) doRequest(method, url string, body io.Reader, cont
 
 	resp, err := s.client.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, err
+		return nil, resp.StatusCode, err
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("kubernetes API returned %d: %s", resp.StatusCode, string(respBody))
+		return respBody, resp.StatusCode, fmt.Errorf("kubernetes API returned %d: %s", resp.StatusCode, string(respBody))
 	}
 
-	return respBody, nil
+	return respBody, resp.StatusCode, nil
 }
 
 func (s *kubernetesUserStore) fetchSecret() (map[string]interface{}, error) {
@@ -138,8 +145,12 @@ func (s *kubernetesUserStore) fetchSecret() (map[string]interface{}, error) {
 	}
 	s.mu.RUnlock()
 
-	body, err := s.doRequest(http.MethodGet, s.secretURL(), nil, "")
+	body, statusCode, err := s.doRequest(http.MethodGet, s.secretURL(), nil, "")
 	if err != nil {
+		if statusCode == http.StatusNotFound {
+			// Secret does not exist yet — treat as empty user store
+			return make(map[string]interface{}), nil
+		}
 		return nil, fmt.Errorf("failed to get secret: %w", err)
 	}
 
@@ -213,7 +224,7 @@ func (s *kubernetesUserStore) SetUserData(key string, value interface{}) error {
 		return fmt.Errorf("failed to marshal patch: %w", err)
 	}
 
-	_, err = s.doRequest(
+	_, _, err = s.doRequest(
 		http.MethodPatch,
 		s.secretURL(),
 		strings.NewReader(string(patchBytes)),
