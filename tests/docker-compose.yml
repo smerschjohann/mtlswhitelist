@@ -16,3 +16,8 @@ services:
 
   whoami:
     image: containous/whoami:latest
+
+  valkey:
+    image: valkey/valkey:8
+    ports:
+      - "6379:6379"

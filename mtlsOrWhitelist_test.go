@@ -163,7 +163,9 @@ func TestMTlsOrWhitelist_ServeHTTP(t *testing.T) {
 			a := &MTlsOrWhitelist{
 				next:           mockNextHandler(tt.wantNextCalled),
 				matchers:       tt.fields.matchers,
+				rawConfig:      tt.fields.rawConfig,
 				requestHeaders: tt.fields.requestHeaders,
+				userStore:      newConfigUserStore(nil),
 			}
 			err := a.matchers.Init()
 			if err != nil {

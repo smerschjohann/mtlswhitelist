@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 )
 
 func (a *MTlsOrWhitelist) serveLoginPage(rw http.ResponseWriter, req *http.Request) {
@@ -106,6 +107,14 @@ func (a *MTlsOrWhitelist) serveLoginPage(rw http.ResponseWriter, req *http.Reque
 }
 
 func (a *MTlsOrWhitelist) serveRegisterPage(rw http.ResponseWriter, req *http.Request) {
+	// Auth guard: existing users must be 2FA-authenticated
+	identity, allowed := a.isRegistrationAllowed(req)
+	if !allowed {
+		loginURL := a.rawConfig.TwoFactor.PathPrefix + "login?redirect=" + req.URL.String()
+		http.Redirect(rw, req, loginURL, http.StatusFound)
+		return
+	}
+
 	var cn, sn, ip string
 	if req.TLS != nil && len(req.TLS.PeerCertificates) > 0 {
 		cn = req.TLS.PeerCertificates[0].Subject.CommonName
@@ -117,14 +126,23 @@ func (a *MTlsOrWhitelist) serveRegisterPage(rw http.ResponseWriter, req *http.Re
 	}
 
 	totpSecret := a.generateTOTPSecret()
-	identity := cn
-	if identity == "" {
-		identity = ip
-	}
+	// identity from isRegistrationAllowed is authoritative
 
 	issuer := url.QueryEscape(a.rawConfig.TwoFactor.RPName)
 	label := url.QueryEscape(fmt.Sprintf("%s:%s", a.rawConfig.TwoFactor.RPName, identity))
 	otpAuthURL := fmt.Sprintf("otpauth://totp/%s?secret=%s&issuer=%s", label, totpSecret, issuer)
+
+	storeType := a.rawConfig.TwoFactor.UserStore.Type
+	if storeType == "" {
+		storeType = "config"
+	}
+	hasExternalStore := storeType != "config"
+
+	// Check if caller is admin
+	adminLink := ""
+	if a.isAdminIdentity(identity) && a.is2FAAuthenticated(req) {
+		adminLink = fmt.Sprintf(`<a href="%sadmin" style="color: #1877f2; text-decoration: none; font-size: 0.9rem;">&rarr; Admin Panel</a>`, a.rawConfig.TwoFactor.PathPrefix)
+	}
 
 	html := fmt.Sprintf(`
 <!DOCTYPE html>
@@ -148,16 +166,25 @@ func (a *MTlsOrWhitelist) serveRegisterPage(rw http.ResponseWriter, req *http.Re
         button:hover { background: #166fe5; }
         .qr-container { display: flex; justify-content: center; margin: 1rem 0; padding: 1rem; background: white; border-radius: 8px; border: 1px solid #ddd; }
         .secret-box { display: flex; align-items: center; justify-content: space-between; background: #f8f9fa; padding: 0.75rem; border-radius: 6px; border: 1px solid #ddd; margin: 1rem 0; }
+        .success { background: #d4edda; color: #155724; padding: 1rem; border-radius: 8px; border-left: 5px solid #28a745; margin: 1rem 0; display: none; }
+        .error { background: #f8d7da; color: #721c24; padding: 1rem; border-radius: 8px; border-left: 5px solid #dc3545; margin: 1rem 0; display: none; }
     </style>
 </head>
 <body>
     <div class="card">
-        <h1>2FA Setup</h1>
+        <div style="display: flex; justify-content: space-between; align-items: center;">
+            <h1>2FA Setup</h1>
+            %s
+        </div>
         
         <div class="info">
             <strong>Detected Identity:</strong> <code>%s</code><br>
-            <small>CN: %s, SN: %s, IP: %s</small>
+            <small>CN: %s, SN: %s, IP: %s</small><br>
+            <small>Store: <code>%s</code></small>
         </div>
+
+        <div id="successMsg" class="success"></div>
+        <div id="errorMsg" class="error"></div>
 
         <div class="step">
             <h2>Option A: TOTP (App)</h2>
@@ -167,6 +194,9 @@ func (a *MTlsOrWhitelist) serveRegisterPage(rw http.ResponseWriter, req *http.Re
             <div class="secret-box">
                 <code id="totpSecret">%s</code>
             </div>
+            <p>3. Enter the 6-digit code from your app to verify:</p>
+            <input type="text" id="totpCode" placeholder="000000" maxlength="6" style="padding: 0.75rem; border-radius: 6px; border: 1px solid #ddd; width: 100%%; box-sizing: border-box; margin-bottom: 1rem; font-size: 1.25rem; text-align: center; letter-spacing: 0.25rem;">
+            <button id="btnSaveTOTP" onclick="saveTOTP()">Verify & Save TOTP</button>
         </div>
 
         <div class="step">
@@ -183,6 +213,9 @@ func (a *MTlsOrWhitelist) serveRegisterPage(rw http.ResponseWriter, req *http.Re
     </div>
 
     <script>
+        const hasExternalStore = %s;
+        const totpSecret = "%s";
+
         // Generate QR Code
         new QRCode(document.getElementById("qrcode"), {
             text: "%s",
@@ -192,6 +225,53 @@ func (a *MTlsOrWhitelist) serveRegisterPage(rw http.ResponseWriter, req *http.Re
             colorLight : "#ffffff",
             correctLevel : QRCode.CorrectLevel.M
         });
+
+        function showSuccess(msg) {
+            const el = document.getElementById('successMsg');
+            el.innerText = msg;
+            el.style.display = 'block';
+            document.getElementById('errorMsg').style.display = 'none';
+        }
+
+        function showError(msg) {
+            const el = document.getElementById('errorMsg');
+            el.innerText = msg;
+            el.style.display = 'block';
+            document.getElementById('successMsg').style.display = 'none';
+        }
+
+        async function saveTOTP() {
+            const code = document.getElementById('totpCode').value.trim();
+            if (!code || code.length !== 6) {
+                showError('Please enter a valid 6-digit verification code.');
+                return;
+            }
+
+            if (hasExternalStore) {
+                try {
+                    const formData = new URLSearchParams();
+                    formData.append('secret', totpSecret);
+                    formData.append('code', code);
+                    const response = await fetch('register-totp', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                        body: formData.toString()
+                    });
+                    if (response.ok) {
+                        const data = await response.json();
+                        showSuccess('TOTP secret verified and saved for identity: ' + data.identity);
+                        document.getElementById('totpCode').value = '';
+                    } else {
+                        const errText = await response.text();
+                        showError('Failed to verify TOTP: ' + errText);
+                    }
+                } catch (err) {
+                    showError('Error: ' + err.message);
+                }
+            } else {
+                showConfig('"' + "%s" + '":\n  - totp: "' + totpSecret + '"');
+            }
+        }
 
         async function registerPasskey() {
             try {
@@ -219,10 +299,25 @@ func (a *MTlsOrWhitelist) serveRegisterPage(rw http.ResponseWriter, req *http.Re
                     alg: -7
                 };
 
-                const snippet = '"' + "%s" + '":\n  - totp: "' + document.getElementById('totpSecret').innerText + '"\n  - ' + JSON.stringify(result, null, 2).replace(/\n/g, '\n    ');
-                showConfig(snippet);
+                if (hasExternalStore) {
+                    const response = await fetch('register-passkey', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(result)
+                    });
+                    if (response.ok) {
+                        const data = await response.json();
+                        showSuccess('Passkey saved for identity: ' + data.identity);
+                    } else {
+                        const errText = await response.text();
+                        showError('Failed to save Passkey: ' + errText);
+                    }
+                } else {
+                    const snippet = '"' + "%s" + '":\n  - totp: "' + totpSecret + '"\n  - ' + JSON.stringify(result, null, 2).replace(/\n/g, '\n    ');
+                    showConfig(snippet);
+                }
             } catch (err) {
-                alert("Passkey Error: " + err.message);
+                showError("Passkey Error: " + err.message);
             }
         }
 
@@ -232,12 +327,25 @@ func (a *MTlsOrWhitelist) serveRegisterPage(rw http.ResponseWriter, req *http.Re
             document.getElementById('result').scrollIntoView({ behavior: 'smooth' });
         }
 
-        // Initial snippet with just TOTP
-        showConfig('"' + "%s" + '":\n  - totp: "' + "%s" + '"');
+        // Show initial TOTP snippet for config store mode
+        if (!hasExternalStore) {
+            showConfig('"' + "%s" + '":\n  - totp: "' + totpSecret + '"');
+        }
     </script>
 </body>
 </html>
-`, identity, cn, sn, ip, totpSecret, otpAuthURL, a.rawConfig.TwoFactor.RPName, a.rawConfig.TwoFactor.RPID, identity, identity, identity, identity, totpSecret)
+`, adminLink, identity, cn, sn, ip, storeType, totpSecret,
+		strconv.FormatBool(hasExternalStore),
+		totpSecret,
+		otpAuthURL,
+		// saveTOTP fallback identity
+		identity,
+		// registerPasskey params
+		a.rawConfig.TwoFactor.RPName, a.rawConfig.TwoFactor.RPID, identity, identity,
+		// registerPasskey fallback identity
+		identity,
+		// initial snippet identity
+		identity)
 	if _, err := rw.Write([]byte(html)); err != nil {
 		fmt.Printf("Error writing register page: %v\n", err)
 	}

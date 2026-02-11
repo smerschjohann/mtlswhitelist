@@ -12,6 +12,7 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -32,6 +33,7 @@ const (
 	totpMod               = 1000000
 	totpStep              = 30
 	webAuthnTimeout       = 60000
+	adminStoreKey         = "__2fa_admins__"
 )
 
 func (a *MTlsOrWhitelist) is2FAAuthenticated(req *http.Request) bool {
@@ -54,6 +56,10 @@ func (a *MTlsOrWhitelist) is2FAAuthenticated(req *http.Request) bool {
 	timestampStr := parts[3]
 
 	// Verify identity matches current request (case-insensitive)
+	if a.userStore == nil {
+		fmt.Println("[2FA] Critical Error: userStore is nil during authentication check")
+		return false
+	}
 	_, canonicalID, ok := a.getUserData(req)
 	if !ok || identity != canonicalID {
 		return false
@@ -110,6 +116,8 @@ func (a *MTlsOrWhitelist) getSessionPayload(identity string) string {
 	return fmt.Sprintf("%s|%s|%s|%s", sessionPayloadVersion, identity, nonceB64, time.Now().Format(time.RFC3339))
 }
 
+//
+//nolint:gocyclo // identity detection across multiple sources requires handling many cases
 func (a *MTlsOrWhitelist) getUserData(req *http.Request) ([]string, string, bool) {
 	// 1. Detect base identities
 	identities := []string{}
@@ -123,23 +131,29 @@ func (a *MTlsOrWhitelist) getUserData(req *http.Request) ([]string, string, bool
 	}
 	identities = append(identities, clientIP)
 
-	// 2. Try matching
+	// 2. Fetch users from store
+	users, usersErr := a.userStore.ListUsers()
+	if usersErr != nil {
+		fmt.Printf("[2FA] Error listing users: %v\n", usersErr)
+		return nil, "", false
+	}
+
+	// 3. Try matching
 	for _, id := range identities {
-		// Exact/Case-insensitive matching
-		for key, val := range a.rawConfig.TwoFactor.Users {
+		for key, val := range users {
 			if strings.EqualFold(key, id) {
 				return a.convertUserData(val), key, true
 			}
 		}
 	}
 
-	// 3. Try IP range matching
+	// 4. Try IP range matching
 	ip := net.ParseIP(clientIP)
 	if ip != nil {
-		for key, val := range a.rawConfig.TwoFactor.Users {
+		for key, val := range users {
 			if strings.Contains(key, "/") {
-				_, ipNet, err := net.ParseCIDR(key)
-				if err == nil && ipNet.Contains(ip) {
+				_, ipNet, cidrErr := net.ParseCIDR(key)
+				if cidrErr == nil && ipNet.Contains(ip) {
 					return a.convertUserData(val), key, true
 				}
 			}
@@ -252,12 +266,139 @@ func (a *MTlsOrWhitelist) cleanUpForJSON(i interface{}) interface{} {
 }
 
 func (a *MTlsOrWhitelist) redirectTo2FA(rw http.ResponseWriter, req *http.Request) {
-	// For API requests or similar, we might want to return 401 instead of redirecting
-	// For now, let's redirect to the login page
+	identity := a.detectIdentity(req)
+	hasCredentials := false
+	if a.userStore != nil {
+		_, hasCredentials, _ = a.userStore.GetUserData(identity)
+	} else {
+		fmt.Println("[2FA] Warning: userStore is nil during redirect check")
+	}
+
+	if !hasCredentials {
+		// New user — send to register page
+		registerURL := a.rawConfig.TwoFactor.PathPrefix + "register?redirect=" + req.URL.String()
+		http.Redirect(rw, req, registerURL, http.StatusFound)
+		return
+	}
+
+	// Existing user — send to login page
 	loginURL := a.rawConfig.TwoFactor.PathPrefix + "login?redirect=" + req.URL.String()
 	http.Redirect(rw, req, loginURL, http.StatusFound)
 }
 
+// isRegistrationAllowed checks if the request is authorized to register/manage credentials.
+// Returns the caller's identity and whether the operation is allowed.
+// Allowed when: (1) no credentials exist yet (first-time), or (2) user is 2FA-authenticated.
+func (a *MTlsOrWhitelist) isRegistrationAllowed(req *http.Request) (string, bool) {
+	identity := a.detectIdentity(req)
+	if identity == "" {
+		return "", false
+	}
+
+	if a.userStore == nil {
+		fmt.Println("[2FA] Critical Error: userStore is nil during registration check")
+		return identity, false
+	}
+
+	_, hasCredentials, err := a.userStore.GetUserData(identity)
+	if err != nil {
+		fmt.Printf("[2FA] Error checking credentials for %s: %v\n", identity, err)
+		return identity, false
+	}
+
+	if !hasCredentials {
+		// First-time user — allowed
+		return identity, true
+	}
+
+	// Existing user — must be 2FA-authenticated
+	return identity, a.is2FAAuthenticated(req)
+}
+
+// getAdmins returns the list of admin identities from the store.
+func (a *MTlsOrWhitelist) getAdmins() []string {
+	val, found, err := a.userStore.GetUserData(adminStoreKey)
+	if err != nil || !found || val == nil {
+		return nil
+	}
+	switch v := val.(type) {
+	case []interface{}:
+		admins := make([]string, 0, len(v))
+		for _, item := range v {
+			if s, ok := item.(string); ok {
+				admins = append(admins, s)
+			}
+		}
+		return admins
+	case []string:
+		return v
+	default:
+		return nil
+	}
+}
+
+// setAdmins persists the admin identity list to the store.
+func (a *MTlsOrWhitelist) setAdmins(admins []string) error {
+	list := make([]interface{}, len(admins))
+	for i, admin := range admins {
+		list[i] = admin
+	}
+	return a.userStore.SetUserData(adminStoreKey, list)
+}
+
+// isAdminIdentity checks if the given identity is in the admin list.
+func (a *MTlsOrWhitelist) isAdminIdentity(identity string) bool {
+	for _, admin := range a.getAdmins() {
+		if strings.EqualFold(admin, identity) {
+			return true
+		}
+	}
+	return false
+}
+
+// isAdmin checks if the current request is from an authenticated admin.
+func (a *MTlsOrWhitelist) isAdmin(req *http.Request) (string, bool) {
+	identity := a.detectIdentity(req)
+	if identity == "" {
+		return "", false
+	}
+	if !a.isAdminIdentity(identity) {
+		return identity, false
+	}
+	// Admin must have credentials and be 2FA-authenticated
+	_, hasCredentials, _ := a.userStore.GetUserData(identity)
+	if !hasCredentials {
+		return identity, false
+	}
+	return identity, a.is2FAAuthenticated(req)
+}
+
+// promoteFirstAdmin sets the given identity as admin if no admins exist yet.
+func (a *MTlsOrWhitelist) promoteFirstAdmin(identity string) {
+	admins := a.getAdmins()
+	if len(admins) == 0 {
+		if err := a.setAdmins([]string{identity}); err != nil {
+			fmt.Printf("[2FA] Failed to set first admin %s: %v\n", identity, err)
+		} else {
+			fmt.Printf("[2FA] First user %s promoted to admin\n", identity)
+		}
+	}
+}
+
+// clearSessionCookie deletes the 2FA session cookie.
+func (a *MTlsOrWhitelist) clearSessionCookie(rw http.ResponseWriter) {
+	http.SetCookie(rw, &http.Cookie{
+		Name:     a.rawConfig.TwoFactor.CookieName,
+		Value:    "",
+		Path:     "/",
+		HttpOnly: true,
+		Secure:   true,
+		MaxAge:   -1,
+	})
+}
+
+//
+//nolint:gocyclo // Serve2FA is a simple route dispatcher
 func (a *MTlsOrWhitelist) Serve2FA(rw http.ResponseWriter, req *http.Request) {
 	path := req.URL.Path
 	if strings.HasSuffix(path, "/login") {
@@ -266,6 +407,18 @@ func (a *MTlsOrWhitelist) Serve2FA(rw http.ResponseWriter, req *http.Request) {
 	}
 	if strings.HasSuffix(path, "/register") {
 		a.serveRegisterPage(rw, req)
+		return
+	}
+	if strings.HasSuffix(path, "/register-totp") {
+		a.handleRegisterTOTP(rw, req)
+		return
+	}
+	if strings.HasSuffix(path, "/register-passkey") {
+		a.handleRegisterPasskey(rw, req)
+		return
+	}
+	if strings.HasSuffix(path, "/delete-credential") {
+		a.handleDeleteCredential(rw, req)
 		return
 	}
 	if strings.HasSuffix(path, "/verify-totp") {
@@ -278,6 +431,27 @@ func (a *MTlsOrWhitelist) Serve2FA(rw http.ResponseWriter, req *http.Request) {
 	}
 	if strings.HasSuffix(path, "/webauthn/verify") {
 		a.handleWebAuthnVerify(rw, req)
+		return
+	}
+	// Admin routes
+	if strings.HasSuffix(path, "/admin") {
+		a.serveAdminPage(rw, req)
+		return
+	}
+	if strings.HasSuffix(path, "/admin/users") {
+		a.handleAdminListUsers(rw, req)
+		return
+	}
+	if strings.HasSuffix(path, "/admin/user") {
+		a.handleAdminGetUser(rw, req)
+		return
+	}
+	if strings.HasSuffix(path, "/admin/delete") {
+		a.handleAdminDeleteCredential(rw, req)
+		return
+	}
+	if strings.HasSuffix(path, "/admin/set-admin") {
+		a.handleAdminSetAdmin(rw, req)
 		return
 	}
 	http.NotFound(rw, req)
@@ -640,4 +814,216 @@ type ClientDataJSON struct {
 	Type      string `json:"type"`
 	Challenge string `json:"challenge"`
 	Origin    string `json:"origin"`
+}
+
+type RegisterPasskeyRequest struct {
+	CredentialID string `json:"credentialId"`
+	PublicKey    string `json:"publicKey"`
+	Alg          int    `json:"alg"`
+}
+
+func (a *MTlsOrWhitelist) handleRegisterTOTP(rw http.ResponseWriter, req *http.Request) {
+	if req.Method != http.MethodPost {
+		http.Error(rw, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	identity, allowed := a.isRegistrationAllowed(req)
+	if !allowed {
+		http.Error(rw, "forbidden: complete 2FA verification first", http.StatusForbidden)
+		return
+	}
+
+	secret, code, err := a.parseRegistrationRequest(req)
+	if err != nil {
+		http.Error(rw, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	// Mandatory verification
+	if !a.VerifyTOTP(code, secret) {
+		http.Error(rw, "invalid verification code", http.StatusBadRequest)
+		return
+	}
+
+	// Build credential entry
+	totpEntry := map[string]interface{}{"totp": secret}
+
+	if saveErr := a.mergeAndSaveCredential(identity, totpEntry); saveErr != nil {
+		http.Error(rw, "failed to save: "+saveErr.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// First-ever user becomes admin
+	a.promoteFirstAdmin(identity)
+
+	rw.Header().Set("Content-Type", "application/json")
+	rw.WriteHeader(http.StatusOK)
+	if encErr := json.NewEncoder(rw).Encode(map[string]string{"status": "ok", "identity": identity}); encErr != nil {
+		fmt.Printf("[2FA] Failed to encode response: %v\n", encErr)
+	}
+}
+
+func (a *MTlsOrWhitelist) handleRegisterPasskey(rw http.ResponseWriter, req *http.Request) {
+	if req.Method != http.MethodPost {
+		http.Error(rw, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	identity, allowed := a.isRegistrationAllowed(req)
+	if !allowed {
+		http.Error(rw, "forbidden: complete 2FA verification first", http.StatusForbidden)
+		return
+	}
+
+	var passkeyReq RegisterPasskeyRequest
+	if err := json.NewDecoder(req.Body).Decode(&passkeyReq); err != nil {
+		http.Error(rw, "invalid JSON", http.StatusBadRequest)
+		return
+	}
+
+	passkeyEntry := map[string]interface{}{
+		"credentialId": passkeyReq.CredentialID,
+		"publicKey":    passkeyReq.PublicKey,
+		"alg":          passkeyReq.Alg,
+	}
+
+	if saveErr := a.mergeAndSaveCredential(identity, passkeyEntry); saveErr != nil {
+		http.Error(rw, "failed to save: "+saveErr.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// First-ever user becomes admin
+	a.promoteFirstAdmin(identity)
+
+	rw.Header().Set("Content-Type", "application/json")
+	rw.WriteHeader(http.StatusOK)
+	if encErr := json.NewEncoder(rw).Encode(map[string]string{"status": "ok", "identity": identity}); encErr != nil {
+		fmt.Printf("[2FA] Failed to encode response: %v\n", encErr)
+	}
+}
+
+func (a *MTlsOrWhitelist) handleDeleteCredential(rw http.ResponseWriter, req *http.Request) {
+	if req.Method != http.MethodPost {
+		http.Error(rw, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	identity, allowed := a.isRegistrationAllowed(req)
+	if !allowed {
+		http.Error(rw, "forbidden: complete 2FA verification first", http.StatusForbidden)
+		return
+	}
+
+	var delReq struct {
+		Index int `json:"index"`
+	}
+	if err := json.NewDecoder(req.Body).Decode(&delReq); err != nil {
+		http.Error(rw, "invalid JSON", http.StatusBadRequest)
+		return
+	}
+
+	existing, found, err := a.userStore.GetUserData(identity)
+	if err != nil || !found {
+		http.Error(rw, "no credentials found", http.StatusNotFound)
+		return
+	}
+
+	credentials := a.toCredentialSlice(existing)
+	if delReq.Index < 0 || delReq.Index >= len(credentials) {
+		http.Error(rw, "index out of range", http.StatusBadRequest)
+		return
+	}
+
+	// Remove the credential at index
+	credentials = append(credentials[:delReq.Index], credentials[delReq.Index+1:]...)
+
+	mustReRegister := false
+	if len(credentials) == 0 {
+		// Last credential removed — delete user data and clear cookie
+		if saveErr := a.userStore.SetUserData(identity, nil); saveErr != nil {
+			http.Error(rw, "failed to save: "+saveErr.Error(), http.StatusInternalServerError)
+			return
+		}
+		a.clearSessionCookie(rw)
+		mustReRegister = true
+	} else {
+		if saveErr := a.userStore.SetUserData(identity, credentials); saveErr != nil {
+			http.Error(rw, "failed to save: "+saveErr.Error(), http.StatusInternalServerError)
+			return
+		}
+	}
+
+	rw.Header().Set("Content-Type", "application/json")
+	rw.WriteHeader(http.StatusOK)
+	resp := map[string]interface{}{"status": "ok", "remaining": len(credentials), "mustReRegister": mustReRegister}
+	if encErr := json.NewEncoder(rw).Encode(resp); encErr != nil {
+		fmt.Printf("[2FA] Failed to encode response: %v\n", encErr)
+	}
+}
+
+// toCredentialSlice normalizes stored credential data into a slice.
+func (a *MTlsOrWhitelist) toCredentialSlice(existing interface{}) []interface{} {
+	if existing == nil {
+		return nil
+	}
+	switch v := existing.(type) {
+	case []interface{}:
+		return v
+	default:
+		return []interface{}{v}
+	}
+}
+
+func (a *MTlsOrWhitelist) parseRegistrationRequest(req *http.Request) (string, string, error) {
+	if err := req.ParseForm(); err != nil {
+		return "", "", fmt.Errorf("invalid form: %w", err)
+	}
+
+	secret := strings.TrimSpace(req.FormValue("secret"))
+	if secret == "" {
+		return "", "", errors.New("missing secret")
+	}
+
+	code := strings.TrimSpace(req.FormValue("code"))
+	if code == "" {
+		return secret, "", errors.New("missing verification code")
+	}
+
+	return secret, code, nil
+}
+
+func (a *MTlsOrWhitelist) detectIdentity(req *http.Request) string {
+	if req.TLS != nil && len(req.TLS.PeerCertificates) > 0 {
+		cn := req.TLS.PeerCertificates[0].Subject.CommonName
+		if cn != "" {
+			return cn
+		}
+	}
+	clientIP, _, err := net.SplitHostPort(req.RemoteAddr)
+	if err != nil {
+		return req.RemoteAddr
+	}
+	return clientIP
+}
+
+// mergeAndSaveCredential adds a new credential entry to the user's existing credentials.
+func (a *MTlsOrWhitelist) mergeAndSaveCredential(identity string, newEntry map[string]interface{}) error {
+	existing, found, err := a.userStore.GetUserData(identity)
+	if err != nil {
+		return fmt.Errorf("failed to get existing data: %w", err)
+	}
+
+	var credentials []interface{}
+	if found && existing != nil {
+		switch v := existing.(type) {
+		case []interface{}:
+			credentials = v
+		default:
+			credentials = []interface{}{v}
+		}
+	}
+
+	credentials = append(credentials, newEntry)
+	return a.userStore.SetUserData(identity, credentials)
 }

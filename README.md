@@ -143,13 +143,14 @@ This plugin supports an optional second factor for authentication. When enabled,
 - `cookieKey`: **REQUIRED for Security**. A secret string used to sign and verify session cookies and WebAuthn challenges. Use a long, random string.
 - `users`: A map of `Identifier -> 2FA Data`. 
 
-> [!WARNING]
-> **Security Requirement**: You MUST configure a strong `cookieKey`. If missing, the middleware rejects all requests.
-    - *Identifier*: 
-        1. If mTLS is used: The Certificate **Common Name (CN)**.
-        2. If mTLS is used but CN is not found: The Certificate **Serial Number**.
-        3. If no certificate is used (IP Whitelist): The client's **IP Address** (or a matching **IP Range/CIDR**).
-    - *2FA Data*: A Base32 TOTP secret OR a JSON string containing Passkey data (Credential ID, Public Key).
+> **Security Requirement**:
+> You MUST configure a strong `cookieKey`. If missing, the middleware rejects all requests.
+>
+>    - *Identifier*: 
+>        1. If mTLS is used: The Certificate **Common Name (CN)**.
+>        2. If mTLS is used but CN is not found: The Certificate **Serial Number**.
+>        3. If no certificate is used (IP Whitelist): The client's **IP Address** (or a matching **IP Range/CIDR**).
+>    - *2FA Data*: A Base32 TOTP secret OR a JSON string containing Passkey data (Credential ID, Public Key).
 
 #### Registration Mode
 
@@ -164,6 +165,72 @@ twoFactor:
   enabled: true
   users:
     "TestCN": "JBSWY3DPEHPK3PXP" # Base32 TOTP Secret
+```
+
+#### External User Stores
+
+If you want to allow users to register their own 2FA credentials or if you have multiple Traefik instances, it makes sense to use an external user store.
+
+##### Valkey / Redis
+
+Stores user data in a Valkey or Redis instance.
+
+```yaml
+twoFactor:
+  enabled: true
+  userStore:
+    type: "valkey"
+    address: "valkey:6379"
+    password: "yourpassword" # optional
+    db: 0
+    keyPrefix: "2fa:"
+```
+
+##### Kubernetes Secret
+
+Stores user data in a Kubernetes Secret. Note that traefik must be able to read and write to the secret.
+
+```yaml
+twoFactor:
+  enabled: true
+  userStore:
+    type: "kubernetes"
+    secretName: "mtls-2fa-users"
+    secretNamespace: "traefik" # optional, defaults to traefik's namespace
+```
+
+**RBAC Configuration for Kubernetes**
+
+When using the Kubernetes store, Traefik's ServiceAccount needs permissions to `get` and `patch` the specified Secret.
+
+Create a `Role` and `RoleBinding` in the namespace where the secret resides:
+
+```yaml
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: mtls-2fa-store-manager
+  namespace: traefik
+rules:
+- apiGroups: [""]
+  resources: ["secrets"]
+  resourceNames: ["mtls-2fa-users"]
+  verbs: ["get", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: mtls-2fa-store-manager-binding
+  namespace: traefik
+subjects:
+- kind: ServiceAccount
+  name: traefik # Replace with your Traefik ServiceAccount name
+  namespace: traefik
+roleRef:
+  kind: Role
+  name: mtls-2fa-store-manager
+  apiGroup: rbac.authorization.k8s.io
 ```
 
 ### Reject Message

@@ -24,7 +24,10 @@ func TestMTlsOrWhitelist_getUserData_Multi(t *testing.T) {
 			},
 		},
 	}
-	a := &MTlsOrWhitelist{rawConfig: rawConfig}
+	a := &MTlsOrWhitelist{
+		rawConfig: rawConfig,
+		userStore: newConfigUserStore(rawConfig.TwoFactor.Users),
+	}
 
 	t.Run("UserA - Multi", func(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/", nil)
