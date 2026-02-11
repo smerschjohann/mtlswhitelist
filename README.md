@@ -197,6 +197,8 @@ twoFactor:
     type: "kubernetes"
     secretName: "mtls-2fa-users"
     secretNamespace: "traefik" # optional, defaults to traefik's namespace
+    insecureSkipVerify: false # optional, set to true to skip TLS verification
+    debug: false # optional, set to true to enable verbose logging
 ```
 
 **RBAC Configuration for Kubernetes**

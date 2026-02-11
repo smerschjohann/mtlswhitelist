@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"text/template"
@@ -51,6 +52,7 @@ type UserStoreConfig struct {
 	SecretName         string `json:"secretName,omitempty"`         // Kubernetes: secret name
 	SecretNamespace    string `json:"secretNamespace,omitempty"`    // Kubernetes: namespace (auto-detected if empty)
 	InsecureSkipVerify bool   `json:"insecureSkipVerify,omitempty"` // TLS: skip certificate verification
+	Debug              bool   `json:"debug,omitempty"`              // Enable verbose logging
 	Address            string `json:"address,omitempty"`            // Valkey: host:port
 	Password           string `json:"password,omitempty"`           // Valkey: AUTH password
 	DB                 int    `json:"db,omitempty"`                 // Valkey: database number
@@ -88,6 +90,8 @@ func CreateConfig() *RawConfig {
 
 // New created a new Demo plugin.
 func New(ctx context.Context, next http.Handler, rawConfig *RawConfig, name string) (http.Handler, error) {
+	fmt.Fprintf(os.Stderr, "[MTLS-PLUGIN] Initializing plugin: %s\n", name)
+
 	if rawConfig.TwoFactor.PathPrefix == "" {
 		rawConfig.TwoFactor.PathPrefix = "/_mtls_2fa/"
 	}
@@ -149,6 +153,7 @@ func initUserStore(rawConfig *RawConfig) (UserStore, error) {
 			rawConfig.TwoFactor.UserStore.SecretName,
 			rawConfig.TwoFactor.UserStore.SecretNamespace,
 			rawConfig.TwoFactor.UserStore.InsecureSkipVerify,
+			rawConfig.TwoFactor.UserStore.Debug,
 		)
 	case "valkey":
 		fmt.Printf("[2FA] Using Valkey user store at %s\n", rawConfig.TwoFactor.UserStore.Address)
@@ -164,6 +169,10 @@ func initUserStore(rawConfig *RawConfig) (UserStore, error) {
 }
 
 func (a *MTlsOrWhitelist) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
+	if a.rawConfig.TwoFactor.UserStore.Debug {
+		fmt.Fprintf(os.Stderr, "[MTLS-PLUGIN] ServeHTTP: %s %s\n", req.Method, req.URL.Path)
+	}
+
 	// 1. Handle internal 2FA paths
 	if a.handleInternal2FA(rw, req) {
 		return

@@ -31,6 +31,7 @@ type kubernetesUserStore struct {
 	namespace string
 	name      string
 	client    *http.Client
+	debug     bool
 
 	mu        sync.RWMutex
 	cache     map[string]interface{}
@@ -39,7 +40,7 @@ type kubernetesUserStore struct {
 
 func (s *kubernetesUserStore) Type() string { return "kubernetes" }
 
-func newKubernetesUserStore(secretName, secretNamespace string, insecureSkipVerify bool) (*kubernetesUserStore, error) {
+func newKubernetesUserStore(secretName, secretNamespace string, insecureSkipVerify bool, debug bool) (*kubernetesUserStore, error) {
 	host := os.Getenv("KUBERNETES_SERVICE_HOST")
 	port := os.Getenv("KUBERNETES_SERVICE_PORT")
 	if host == "" || port == "" {
@@ -88,6 +89,7 @@ func newKubernetesUserStore(secretName, secretNamespace string, insecureSkipVeri
 		namespace: ns,
 		name:      secretName,
 		client:    client,
+		debug:     debug,
 	}, nil
 }
 
@@ -104,6 +106,9 @@ func (s *kubernetesUserStore) secretURL() string {
 }
 
 func (s *kubernetesUserStore) doRequest(method, url string, body io.Reader, contentType string) ([]byte, int, error) {
+	if s.debug {
+		fmt.Fprintf(os.Stderr, "[2FA-K8S] Request: %s %s\n", method, url)
+	}
 	req, err := http.NewRequest(method, url, body)
 	if err != nil {
 		return nil, 0, err
@@ -120,6 +125,9 @@ func (s *kubernetesUserStore) doRequest(method, url string, body io.Reader, cont
 
 	resp, err := s.client.Do(req)
 	if err != nil {
+		if s.debug {
+			fmt.Fprintf(os.Stderr, "[2FA-K8S] Request failed: %v\n", err)
+		}
 		return nil, 0, err
 	}
 	defer func() { _ = resp.Body.Close() }()
@@ -127,6 +135,10 @@ func (s *kubernetesUserStore) doRequest(method, url string, body io.Reader, cont
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, resp.StatusCode, err
+	}
+
+	if s.debug {
+		fmt.Fprintf(os.Stderr, "[2FA-K8S] Response: %d, Body: %s\n", resp.StatusCode, string(respBody))
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -141,6 +153,9 @@ func (s *kubernetesUserStore) fetchSecret() (map[string]interface{}, error) {
 	if s.cache != nil && time.Since(s.cacheTime) < k8sCacheTTL {
 		cached := s.cache
 		s.mu.RUnlock()
+		if s.debug {
+			fmt.Fprintln(os.Stderr, "[2FA-K8S] Using cached secret data")
+		}
 		return cached, nil
 	}
 	s.mu.RUnlock()
@@ -165,13 +180,22 @@ func (s *kubernetesUserStore) fetchSecret() (map[string]interface{}, error) {
 	for key, b64Value := range secret.Data {
 		decoded, err := base64.StdEncoding.DecodeString(b64Value)
 		if err != nil {
+			if s.debug {
+				fmt.Fprintf(os.Stderr, "[2FA-K8S] Failed to decode base64 for key %s: %v\n", key, err)
+			}
 			continue
 		}
 		var userData interface{}
 		if err := json.Unmarshal(decoded, &userData); err != nil {
 			// Treat as plain string
+			if s.debug {
+				fmt.Fprintf(os.Stderr, "[2FA-K8S] Data for key %s is not JSON, treating as plain string\n", key)
+			}
 			users[key] = string(decoded)
 			continue
+		}
+		if s.debug {
+			fmt.Fprintf(os.Stderr, "[2FA-K8S] Loaded user data for %s: %v\n", key, userData)
 		}
 		users[key] = userData
 	}
